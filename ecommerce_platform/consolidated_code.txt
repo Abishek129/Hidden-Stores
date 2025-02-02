@@ -1,0 +1,5209 @@
+# App: admin_portal
+# File: admin_portal\models.py
+from django.db import models
+from django.conf import settings
+from cart_orders.models import Order, OrderItem
+from vendors.models import VendorDetails
+import os 
+
+# Model to log admin activities
+class AdminLog(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+                             help_text="Admin who performed the action")
+    action = models.CharField(max_length=255, help_text="Description of the action performed")
+    timestamp = models.DateTimeField(auto_now_add=True, help_text="When the action was performed")
+
+    def __str__(self):
+        return f"{self.user} - {self.action} - {self.timestamp}"
+
+
+# Model to track payouts to vendors
+class VendorPayout(models.Model):
+    vendor = models.ForeignKey(VendorDetails, on_delete=models.CASCADE, related_name="payouts",
+                               help_text="Vendor receiving the payout")
+    amount = models.DecimalField(max_digits=10, decimal_places=2, help_text="Payout amount")
+    status = models.CharField(
+        max_length=20,
+        choices=[('pending', 'Pending'), ('processed', 'Processed')],
+        default='pending',
+        help_text="Status of the payout"
+    )
+    processed_at = models.DateTimeField(null=True, blank=True, help_text="When the payout was processed")
+    created_at = models.DateTimeField(auto_now_add=True, help_text="When the payout was created")
+
+    def __str__(self):
+        return f"Payout for {self.vendor.user.email} - {self.amount} - {self.status}"
+
+
+from django.conf import settings
+from cart_orders.models import OrderItem
+
+def refund_media_upload_path(instance, filename):
+    """
+    Define the upload path for refund media files dynamically.
+    """
+    return os.path.join(
+        "orders", 
+        f"{instance.refund.order_item.order.id}", 
+        f"refunds/{instance.id}/", 
+        filename
+    )
+
+class Refund(models.Model):
+    REFUND_STATUS_CHOICES = [
+        ('initiated', 'Refund Initiated'),
+        ('processed', 'Refund Processed'),
+        ('rejected', 'Refund Rejected'),
+        ('implemented', 'Refund Implemented'),
+    ]
+
+    order_item = models.ForeignKey(
+        OrderItem, 
+        on_delete=models.CASCADE, 
+        related_name="refunds", 
+        help_text="The order item for which the refund is requested."
+    )
+    amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        help_text="Refund amount for the order item."
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=REFUND_STATUS_CHOICES,
+        default='initiated',
+        help_text="Current status of the refund."
+    )
+    reason = models.TextField(
+        default = "__________",
+        help_text="Reason provided by the customer for the refund."
+    )
+    refund_initiated_date = models.DateTimeField(
+        null=True, 
+        blank=True, 
+        help_text="The date when the refund was initiated."
+    )
+    refund_processed_date = models.DateTimeField(
+        null=True, 
+        blank=True, 
+        help_text="The date when the refund was processed."
+    )
+    refund_rejected_date = models.DateTimeField(
+        null=True, 
+        blank=True, 
+        help_text="The date when the refund was rejected."
+    )
+    refund_implemented_date = models.DateTimeField(
+        null=True, 
+        blank=True, 
+        help_text="The date when the refund was implemented."
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True, 
+        help_text="The date when the refund was created."
+    )
+
+    def __str__(self):
+        return f"Refund for {self.order_item.id} - {self.status}"
+
+
+class RefundMedia(models.Model):
+    refund = models.ForeignKey(
+        Refund, 
+        on_delete=models.CASCADE, 
+        related_name="media", 
+        help_text="The refund associated with this media"
+    )
+    media = models.FileField(
+        upload_to=refund_media_upload_path, 
+        help_text="Image or video file supporting the refund request"
+    )
+
+    def save(self, *args, **kwargs):
+        """
+        Override save to perform media processing if required.
+        """
+        super().save(*args, **kwargs)
+        if self.media and self.media.name.lower().endswith(('.png', '.jpg', '.jpeg')):
+            self._convert_image_to_jpeg()
+
+    def _convert_image_to_jpeg(self):
+        """
+        Convert image to JPEG format for consistency.
+        """
+        try:
+            from PIL import Image
+            input_path = self.media.path
+            output_path = f"{os.path.splitext(input_path)[0]}.jpeg"
+            if not os.path.exists(output_path):
+                with Image.open(input_path) as img:
+                    img = img.convert('RGB')
+                    img.save(output_path, 'JPEG', quality=85)
+                self.media.name = os.path.relpath(output_path, settings.MEDIA_ROOT)
+                super().save(update_fields=['media'])
+        except Exception as e:
+            print(f"Error converting image to JPEG: {e}")
+
+    def __str__(self):
+        return f"Media for Refund {self.refund.id}"
+
+# File: admin_portal\serializers.py
+from rest_framework import serializers
+from .models import *
+from vendors.models import VendorDetails
+from authusers.models import *
+
+# Serializer for AdminLog
+class AdminLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AdminLog
+        fields = ['id', 'user', 'action', 'timestamp']
+
+
+# Serializer for VendorPayout
+class VendorPayoutSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VendorPayout
+        fields = ['id', 'vendor', 'amount', 'status', 'processed_at', 'created_at']
+
+
+
+
+
+
+
+class VendorDetailsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VendorDetails
+        fields = [
+            'shop_name', 'shop_logo', 'bio', 'video',
+            'bank_account_number', 'bank_name', 'ifsc_code',
+            'id_proof_type', 'id_proof_file', 'is_verified',
+            'address', 'state', 'city', 'pincode', 'created_at', 'updated_at'
+        ]
+
+class VendorProfileDetailSerializer(serializers.ModelSerializer):
+    vendor_details = VendorDetailsSerializer(source='user.vendor_details', read_only=True)
+
+    class Meta:
+        model = VendorProfile
+        fields = [
+            'user', 'shop_address', 'is_approved', 'created_at', 'vendor_details'
+        ]
+        depth = 1
+
+
+
+class VendorProfileUpdateSerializer(serializers.ModelSerializer):
+    is_approved = serializers.BooleanField()  # This field is modifiable
+
+    class Meta:
+        model = VendorProfile
+        fields = ['user', 'shop_address', 'is_approved', 'created_at']
+        read_only_fields = ['user', 'shop_address', 'created_at']  # These fields are read-only
+
+
+
+class RefundMediaViewSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RefundMedia
+        fields = ['id', 'media']
+
+class RefundDetailSerializer(serializers.ModelSerializer):
+    media = RefundMediaViewSerializer(many=True, read_only=True)
+    order_id = serializers.IntegerField(source='order_item.id', read_only=True)
+    product_name = serializers.CharField(source='order_item.product.name', read_only=True)
+    customer_email = serializers.EmailField(source='order_item.order.customer.email', read_only=True)
+
+    class Meta:
+        model = Refund
+        fields = [
+            'id', 'order_id', 'product_name', 'customer_email', 'reason',
+            'amount', 'refund_status', 'refund_initiated_date', 
+            'refund_processed_date', 'refund_rejected_date', 
+            'refund_implemented_date', 'media', 'created_at'
+        ]
+
+class RefundUpdateSerializer(serializers.ModelSerializer):
+    refund_status = serializers.ChoiceField(choices=Refund.REFUND_STATUS_CHOICES, required=True)
+
+    class Meta:
+        model = Refund
+        fields = ['refund_status']
+
+    def update(self, instance, validated_data):
+        status = validated_data.get('refund_status')
+        current_time = timezone.now()
+
+        # Update timestamps based on the status
+        if status == 'processed':
+            instance.refund_processed_date = current_time
+        elif status == 'rejected':
+            instance.refund_rejected_date = current_time
+        elif status == 'implemented':
+            instance.refund_implemented_date = current_time
+
+        instance.refund_status = status
+        instance.save()
+        return instance
+
+
+
+# File: admin_portal\views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from .models import *
+from .serializers import *
+from django.shortcuts import get_object_or_404
+
+# View for Admin Logs
+class AdminLogView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        logs = AdminLog.objects.all().order_by('-timestamp')
+        serializer = AdminLogSerializer(logs, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# View for Vendor Payouts
+class VendorPayoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        payouts = VendorPayout.objects.all().order_by('-created_at')
+        serializer = VendorPayoutSerializer(payouts, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def patch(self, request, payout_id):
+        payout = get_object_or_404(VendorPayout, id=payout_id)
+        serializer = VendorPayoutSerializer(payout, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+
+
+from rest_framework.generics import RetrieveAPIView
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from authusers.models import VendorProfile
+from .serializers import VendorProfileDetailSerializer
+
+class VendorProfileDetailView(RetrieveAPIView):
+    queryset = VendorProfile.objects.all()
+    serializer_class = VendorProfileDetailSerializer
+    permission_classes = [AllowAny]  # Restrict access to authenticated users
+    lookup_field = 'id'  # This enables looking up the profile by its `id`
+
+
+
+from rest_framework.generics import RetrieveUpdateAPIView
+
+
+class VendorProfileUpdateView(RetrieveUpdateAPIView):
+    queryset = VendorProfile.objects.all()
+    serializer_class = VendorProfileUpdateSerializer
+    permission_classes = [AllowAny]  # Ensure only authenticated users can access
+    lookup_field = 'id' 
+
+
+
+class RefundDetailView(APIView):
+    """
+    View and update refund details by order ID.
+    """
+    def get(self, request, order_id):
+        try:
+            refund = Refund.objects.get(order_item__id=order_id)
+            serializer = RefundDetailSerializer(refund)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Refund.DoesNotExist:
+            return Response({"error": "Refund not found for the provided order ID."}, status=status.HTTP_404_NOT_FOUND)
+
+    def patch(self, request, order_id):
+        try:
+            refund = Refund.objects.get(order_item__id=order_id)
+            serializer = RefundUpdateSerializer(refund, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response({"message": "Refund status updated successfully."}, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Refund.DoesNotExist:
+            return Response({"error": "Refund not found for the provided order ID."}, status=status.HTTP_404_NOT_FOUND)
+
+
+
+class RefundActionView(APIView):
+    """
+    A view to handle refund actions: processed, rejected, implemented.
+    """
+    permission_classes = [AllowAny]
+    def post(self, request, refund_id, action):
+        try:
+            refund = Refund.objects.get(id=refund_id)
+        except Refund.DoesNotExist:
+            return Response({"error": "Refund not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Validate and update based on the action
+        if action == "processed":
+            if refund.status != "initiated":
+                return Response({"error": "Refund must be in 'initiated' state to process."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            refund.status = "processed"
+            refund.refund_processed_date = now()
+
+        elif action == "rejected":
+            if refund.status not in ["initiated", "processed"]:
+                return Response({"error": "Refund must be in 'initiated' or 'processed' state to reject."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            refund.status = "rejected"
+            refund.refund_rejected_date = now()
+
+        elif action == "implemented":
+            if refund.status != "processed":
+                return Response({"error": "Refund must be in 'processed' state to implement."},
+                                status=status.HTTP_400_BAD_REQUEST)
+            refund.status = "implemented"
+            refund.refund_implemented_date = now()
+
+        else:
+            return Response({"error": "Invalid action."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Save changes and respond
+        refund.save()
+        return Response({"message": f"Refund {action} successfully."}, status=status.HTTP_200_OK)
+
+
+
+# File: admin_portal\urls.py
+from django.urls import path
+from .views import *
+from customer.views import RefundDetailView
+
+urlpatterns = [
+    # Admin Logs
+    path('logs/', AdminLogView.as_view(), name='admin-logs'),
+    
+    #Vendor Approvals
+    path('vendor-approved/<int:id>/', VendorProfileUpdateView.as_view(), name='vendor-profile-update'),
+    path('vendor-profile/<int:id>/', VendorProfileDetailView.as_view(), name='vendor-profile-detail'),
+
+    # Vendor Payouts
+    path('payouts/', VendorPayoutView.as_view(), name='vendor-payouts'),
+    path('payouts/<int:payout_id>/', VendorPayoutView.as_view(), name='vendor-payout-detail'),
+
+    # Refunds
+    path('refunds/<int:refund_id>/', RefundDetailView.as_view(), name='refund-detail'),
+    path('refunds/<int:refund_id>/<str:action>/', RefundActionView.as_view(), name='refund-action'),
+]
+
+
+##################################################
+
+# App: authusers
+# File: authusers\models.py
+from django.db import models
+from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.exceptions import ValidationError
+from django.utils.timezone import now, timedelta
+
+
+# ================================
+# User Manager
+# ================================
+class UserManager(BaseUserManager):
+    def create_user(self, email, password=None, **extra_fields):
+        if not email:
+            raise ValueError('The Email field must be set')
+        email = self.normalize_email(email)
+        user = self.model(email=email, **extra_fields)
+        user.set_password(password)
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(self, email, password=None, **extra_fields):
+        extra_fields.setdefault('is_staff', True)
+        extra_fields.setdefault('is_superuser', True)
+
+        if extra_fields.get('is_staff') is not True:
+            raise ValueError('Superuser must have is_staff=True.')
+        if extra_fields.get('is_superuser') is not True:
+            raise ValueError('Superuser must have is_superuser=True.')
+
+        return self.create_user(email, password, **extra_fields)
+
+# ================================
+# User Model
+# ================================
+class User(AbstractBaseUser, PermissionsMixin):
+    USER_TYPE_CHOICES = [
+        ('vendor', 'Vendor'),
+        ('customer', 'Customer'),
+        ('staff', 'Staff'),
+    ]
+
+    email = models.EmailField(unique=True)
+    first_name = models.CharField(max_length=150, blank=True, null=True)
+    last_name = models.CharField(max_length=150, blank=True, null=True)
+    phone_number = models.CharField(max_length=15, blank=True, null=True)
+    user_type = models.CharField(max_length=20, choices=USER_TYPE_CHOICES, default='customer')
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
+    date_joined = models.DateTimeField(auto_now_add=True)
+
+    reset_token = models.CharField(max_length=128, blank=True, null=True)
+    reset_token_created_at = models.DateTimeField(blank=True, null=True)
+
+    objects = UserManager()
+
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = []
+
+    def __str__(self):
+        return self.email
+
+# ================================
+# TemporaryUser Model
+# ================================
+class TemporaryUser(models.Model):
+    email = models.EmailField(unique=True)
+    first_name = models.CharField(max_length=150, blank=True, null=True)
+    last_name = models.CharField(max_length=150, blank=True, null=True)
+    phone_number = models.CharField(max_length=15, blank=True, null=True)
+    user_type = models.CharField(max_length=20, choices=User.USER_TYPE_CHOICES)
+    password = models.CharField(max_length=128)
+    otp = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def is_expired(self):
+        """Check if the TemporaryUser is older than 5 minutes."""
+        return now() > self.created_at + timedelta(minutes=5)
+
+    def __str__(self):
+        return f"Temporary User: {self.email} ({self.user_type})"
+
+
+
+# ================================
+# VendorProfile Model
+# ================================
+class VendorProfile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='vendor_profile')
+    shop_address = models.TextField(blank=True, null=True)
+    is_approved = models.BooleanField(default = False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Vendor Profile: {self.user.email}"
+
+# ================================
+# CustomerProfile Model
+# ================================
+class CustomerProfile(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='customer_profile')
+    date_of_birth = models.DateField(blank=True, null=True)
+    gender = models.CharField(max_length=10, choices=[('Male', 'Male'), ('Female', 'Female'), ('Other', 'Other')], blank=True, null=True)
+
+    def __str__(self):
+        return f"Customer Profile: {self.user.email}"
+
+# ================================
+# OTP Model
+# ================================
+class OTP(models.Model):
+    email = models.EmailField()
+    otp = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def is_expired(self):
+        """Check if the OTP is older than 5 minutes."""
+        return now() > self.created_at + timedelta(minutes=5)
+
+    def __str__(self):
+        return f"OTP for {self.email}: {self.otp}"
+
+
+
+from django.db import models
+from django.conf import settings
+
+class Address(models.Model):
+    """
+    Represents a user's address for checkout and profile management.
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, 
+        on_delete=models.CASCADE, 
+        related_name="addresses"
+    )
+    full_name = models.CharField(max_length=255)
+    phone_number = models.CharField(max_length=15)
+    address_line_1 = models.CharField(max_length=255)
+    address_line_2 = models.CharField(max_length=255, blank=True, null=True)
+    city = models.CharField(max_length=100)
+    state = models.CharField(max_length=100)
+    postal_code = models.CharField(max_length=10)
+    country = models.CharField(max_length=100, default="India")  # Default to India
+    is_default = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        """
+        Ensure only one address is marked as default.
+        """
+        if self.is_default:
+            Address.objects.filter(user=self.user, is_default=True).update(is_default=False)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.full_name}, {self.city}, {self.country}"
+
+# File: authusers\serializers.py
+from rest_framework import serializers
+from django.contrib.auth import authenticate
+from .models import User, TemporaryUser, VendorProfile, CustomerProfile, OTP
+from django.utils.timezone import now
+from django.core.exceptions import ValidationError
+from django.contrib.auth.hashers import make_password
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from .tasks import send_email_task  # Ensure Celery task is imported
+from datetime import timedelta
+
+
+# ================================
+# User Registration Serializer
+# ================================
+class UserRegistrationSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = TemporaryUser
+        fields = ['email', 'first_name', 'last_name', 'phone_number', 'user_type', 'password']
+
+    def validate_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return value
+
+    def create(self, validated_data):
+        validated_data['password'] = make_password(validated_data['password'])  # Hash the password
+        otp = OTP.objects.create(email=validated_data['email'], otp=str(self.generate_otp()))
+        validated_data['otp'] = otp.otp
+        # Save temporary user
+        temp_user = TemporaryUser.objects.create(**validated_data)
+        self.send_otp_email(temp_user.email, otp.otp, temp_user.first_name)  # Include user's name
+        return temp_user
+
+    @staticmethod
+    def generate_otp():
+        """Generate a 6-digit OTP."""
+        import random
+        return random.randint(100000, 999999)
+
+    @staticmethod
+    def send_otp_email(email, otp, first_name):
+        """Send the OTP via email using an HTML template."""
+        subject = "Welcome to HIDDEN STORES - Your OTP Code"
+        plain_message = f"Your OTP is {otp}. It is valid for 5 minutes."
+        html_message = render_to_string('emails/register_email.html', {
+            'otp': otp,
+            'user': {'first_name': first_name},
+            'site_url': 'https://hiddenstores.com',
+        })
+        send_email_task.delay(subject, plain_message, "no-reply@hiddenstores.com", [email], html_message=html_message)  # Use Celery task
+
+# ================================
+# OTP Verification Serializer
+# ================================
+class OTPVerificationSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6)
+
+    def validate(self, data):
+        try:
+            otp_instance = OTP.objects.filter(email=data['email']).latest('created_at')
+        except OTP.DoesNotExist:
+            raise serializers.ValidationError("No OTP found for this email.")
+
+        if otp_instance.otp != data['otp']:
+            raise serializers.ValidationError("Invalid OTP.")
+
+        if otp_instance.is_expired():
+            raise serializers.ValidationError("OTP has expired.")
+
+        return data
+
+    def create_user(self, validated_data):
+        email = validated_data['email']
+        temp_user = TemporaryUser.objects.get(email=email)
+
+        # Move data from TemporaryUser to User
+        user = User.objects.create(
+            email=temp_user.email,
+            first_name=temp_user.first_name,
+            last_name=temp_user.last_name,
+            phone_number=temp_user.phone_number,
+            user_type=temp_user.user_type,
+            password=temp_user.password,
+        )
+
+        # Create Profile
+        if user.user_type == 'vendor':
+            VendorProfile.objects.create(user=user)
+        elif user.user_type == 'customer':
+            CustomerProfile.objects.create(user=user)
+
+        temp_user.delete()  # Remove TemporaryUser after successful registration
+        return user
+
+# ================================
+# Password Login Serializer
+# ================================
+class PasswordLoginSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
+
+    def validate(self, data):
+        user = authenticate(email=data['email'], password=data['password'])
+        if not user:
+            raise serializers.ValidationError("Invalid email or password.")
+        if not user.is_active:
+            raise serializers.ValidationError("This account is inactive.")
+        return user
+
+# ================================
+# OTP Login Serializer
+# ================================
+class OTPLoginSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        if not User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("No user is associated with this email.")
+        return value
+
+    def send_login_otp(self):
+        email = self.validated_data['email']
+        otp = OTP.objects.create(email=email, otp=str(self.generate_otp()))
+        user = User.objects.get(email=email)
+        self.send_otp_email(email, otp.otp, user.first_name)
+
+    @staticmethod
+    def generate_otp():
+        import random
+        return random.randint(100000, 999999)
+
+    @staticmethod
+    def send_otp_email(email, otp, first_name):
+        subject = "HIDDEN STORES - Your Login OTP Code"
+        plain_message = f"Your OTP is {otp}. It is valid for 5 minutes."
+        html_message = render_to_string('emails/login_email.html', {
+            'otp': otp,
+            'user': {'first_name': first_name},
+            'site_url': 'https://hiddenstores.com',
+        })
+        send_email_task.delay(subject, plain_message, "no-reply@hiddenstores.com", [email], html_message=html_message)  # Use Celery task
+
+# ================================
+# VendorProfile Serializer
+# ================================
+class VendorProfileSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VendorProfile
+        fields = [ 'shop_address']
+
+# ================================
+# CustomerProfile Serializer
+# ================================
+class CustomerProfileSerializer(serializers.ModelSerializer):
+    user = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = CustomerProfile
+        fields = ['user','date_of_birth', 'gender']
+
+    def get_user(self, obj):
+        """
+        Return the related User fields as a dictionary.
+        """
+        user = obj.user
+        return {
+            'first_name': user.first_name,
+            'last_name': user.last_name,
+            'phone_number': user.phone_number,
+            'email': user.email,
+        }
+
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['first_name', 'last_name', 'phone_number', 'email']
+
+
+
+from rest_framework import serializers
+from .models import User
+from django.core.mail import send_mail
+from django.utils.crypto import get_random_string
+from django.utils.timezone import now
+from django.conf import settings
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        """Ensure the email exists in the system."""
+        if not User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("No user found with this email.")
+        return value
+
+    def save(self):
+        email = self.validated_data['email']
+        otp_code = str(self.generate_otp())
+        OTP.objects.create(email=email, otp=otp_code)
+
+        # Send OTP via email
+        subject = "Reset Your Password - Hidden Stores"
+        html_message = render_to_string('emails/password_reset_email.html', {
+            'otp': otp_code,
+        })
+        send_email_task.delay(subject, f"Your OTP is {otp_code}.", "no-reply@hiddenstores.com", [email], html_message=html_message)
+
+    @staticmethod
+    def generate_otp():
+        """Generate a 6-digit OTP."""
+        import random
+        return random.randint(100000, 999999)
+
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6)
+    new_password = serializers.CharField(write_only=True)
+
+    def validate(self, data):
+        """Validate OTP and its expiration."""
+        try:
+            otp_instance = OTP.objects.filter(email=data['email']).latest('created_at')
+        except OTP.DoesNotExist:
+            raise serializers.ValidationError("Invalid OTP or email.")
+
+        if otp_instance.otp != data['otp']:
+            raise serializers.ValidationError("Invalid OTP.")
+
+        if otp_instance.is_expired():
+            raise serializers.ValidationError("OTP has expired.")
+
+        return data
+
+    def save(self):
+        """Reset the user's password."""
+        email = self.validated_data['email']
+        new_password = self.validated_data['new_password']
+
+        user = User.objects.get(email=email)
+        user.set_password(new_password)
+        user.save()
+
+        # Delete OTP after successful password reset
+        OTP.objects.filter(email=email).delete()
+
+
+
+
+
+
+from rest_framework import serializers
+from .models import Address
+
+class AddressSerializer(serializers.ModelSerializer):
+    """
+    Serializer for managing user addresses.
+    """
+
+    class Meta:
+        model = Address
+        fields = [
+            'id',
+            'full_name',
+            'phone_number',
+            'address_line_1',
+            'address_line_2',
+            'city',
+            'state',
+            'postal_code',
+            'country',
+            'is_default',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate(self, data):
+        """
+        Custom validation for phone number and other fields if needed.
+        """
+        if len(data.get('phone_number', '')) < 10:
+            raise serializers.ValidationError({"phone_number": "Phone number must be at least 10 digits."})
+        return data
+
+    def create(self, validated_data):
+        """
+        Save new address and handle default address logic.
+        """
+        user = self.context['request'].user
+        address = Address.objects.create(user=user, **validated_data)
+        return address
+
+    def update(self, instance, validated_data):
+        """
+        Update address and ensure only one default address.
+        """
+        if validated_data.get('is_default', False):
+            Address.objects.filter(user=instance.user, is_default=True).update(is_default=False)
+        return super().update(instance, validated_data)
+
+
+# File: authusers\views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from django.contrib.auth import login
+from .models import TemporaryUser, OTP, CustomerProfile
+
+from .serializers import (
+    UserRegistrationSerializer,
+    OTPVerificationSerializer,
+    PasswordLoginSerializer,
+    OTPLoginSerializer,
+    VendorProfileSerializer,
+    CustomerProfileSerializer
+)
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.shortcuts import get_object_or_404
+from django.utils.timezone import now
+from .models import VendorProfile
+from .models import User
+
+
+# ================================
+# Helper Function for JWT Tokens
+# ================================
+def get_tokens_for_user(user):
+    refresh = RefreshToken.for_user(user)
+    return {
+        'refresh': str(refresh),
+        'access': str(refresh.access_token),
+    }
+
+# ================================
+# User Registration View
+# ================================
+class UserRegistrationView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = UserRegistrationSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"message": "Registration successful. OTP sent to email."}, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+# ================================
+# OTP Verification View
+# ================================
+class OTPVerificationView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = OTPVerificationSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.create_user(serializer.validated_data)
+            tokens = get_tokens_for_user(user)
+            return Response({"message": "OTP verified successfully.", "tokens": tokens}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+# ================================
+# Password Login View
+# ================================
+class PasswordLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = PasswordLoginSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.validated_data
+            tokens = get_tokens_for_user(user)
+            login(request, user)
+            return Response({"message": "Login successful.", "tokens": tokens}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_401_UNAUTHORIZED)
+
+# ================================
+# OTP Login View
+# ================================
+class OTPLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = OTPLoginSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.send_login_otp()
+            return Response({"message": "OTP sent to email."}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+# ================================
+# OTP Login Verification View
+# ================================
+class OTPLoginVerificationView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = OTPVerificationSerializer(data=request.data)
+        if serializer.is_valid():
+            email = serializer.validated_data['email']
+            user = get_object_or_404(User, email=email)
+            tokens = get_tokens_for_user(user)
+            return Response({"message": "OTP login successful.", "tokens": tokens}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+# ================================
+# Vendor Profile View
+# ================================
+# ================================
+# Vendor Profile View
+# ================================
+class VendorProfileView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Correctly fetch the VendorProfile object
+        vendor_profile = get_object_or_404(VendorProfile, user=request.user)
+        serializer = VendorProfileSerializer(vendor_profile)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        # Correctly fetch the VendorProfile object
+        vendor_profile = get_object_or_404(VendorProfile, user=request.user)
+        serializer = VendorProfileSerializer(vendor_profile, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ================================
+# Customer Profile View
+# ================================
+class CustomerProfileView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        try:
+            # Access the related customer profile directly
+            customer_profile = request.user.customer_profile
+            serializer = CustomerProfileSerializer(customer_profile)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except CustomerProfile.DoesNotExist:
+            return Response(
+                {"error": "Customer profile not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+    def patch(self, request):
+        try:
+            # Access the related customer profile directly
+            customer_profile = request.user.customer_profile
+            serializer = CustomerProfileSerializer(
+                customer_profile, data=request.data, partial=True
+            )
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except CustomerProfile.DoesNotExist:
+            return Response(
+                {"error": "Customer profile not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+
+
+
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from .serializers import PasswordResetRequestSerializer
+
+class PasswordResetRequestView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = PasswordResetRequestSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"message": "OTP sent to your email."}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+from .serializers import PasswordResetConfirmSerializer
+
+class PasswordResetConfirmView(APIView):
+    permission_classes = [AllowAny]
+    def post(self, request):
+        serializer = PasswordResetConfirmSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"message": "Password has been reset successfully."}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework_simplejwt.tokens import RefreshToken
+
+
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            refresh_token = request.data.get("refresh")
+            token = RefreshToken(refresh_token)
+            token.blacklist()  # Blacklist the token to invalidate it
+            return Response({"message": "Logout successful."}, status=status.HTTP_205_RESET_CONTENT)
+        except Exception as e:
+            return Response({"error": "Invalid token or logout failed."}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from .models import Address
+from .serializers import AddressSerializer
+from django.shortcuts import get_object_or_404
+
+class AddressListCreateView(APIView):
+    """
+    View to list all addresses for the logged-in user and create new addresses.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """
+        Retrieve all addresses for the current user.
+        """
+        addresses = Address.objects.filter(user=request.user)
+        serializer = AddressSerializer(addresses, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        """
+        Create a new address for the current user.
+        """
+        serializer = AddressSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AddressDetailView(APIView):
+    """
+    View to retrieve, update, or delete a specific address for the logged-in user.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, user, pk):
+        """
+        Helper method to get an address or return 404.
+        """
+        return get_object_or_404(Address, user=user, pk=pk)
+
+    def get(self, request, pk):
+        """
+        Retrieve a specific address by its ID.
+        """
+        address = self.get_object(request.user, pk)
+        serializer = AddressSerializer(address)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def put(self, request, pk):
+        """
+        Fully update an address.
+        """
+        address = self.get_object(request.user, pk)
+        serializer = AddressSerializer(address, data=request.data, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def patch(self, request, pk):
+        """
+        Partially update an address.
+        """
+        address = self.get_object(request.user, pk)
+        serializer = AddressSerializer(address, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        """
+        Delete a specific address.
+        """
+        address = self.get_object(request.user, pk)
+        address.delete()
+        return Response({"message": "Address deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
+
+
+# File: authusers\urls.py
+from django.urls import path
+from rest_framework_simplejwt.views import (
+    TokenRefreshView,
+    TokenVerifyView
+)
+
+from .views import (
+    UserRegistrationView,
+    OTPVerificationView,
+    PasswordLoginView,
+    OTPLoginView,
+    OTPLoginVerificationView,
+    VendorProfileView,
+    CustomerProfileView,
+    PasswordResetRequestView, 
+    PasswordResetConfirmView,
+    LogoutView,
+    AddressListCreateView, 
+    AddressDetailView,
+)
+
+urlpatterns = [
+    # Registration Endpoints
+    path('register/', UserRegistrationView.as_view(), name='user-registration'),
+    path('verify-otp/', OTPVerificationView.as_view(), name='otp-verification'),
+
+    # Login Endpoints
+    path('login/password/', PasswordLoginView.as_view(), name='password-login'),
+    path('login/otp/', OTPLoginView.as_view(), name='otp-login'),
+    path('login/verify-otp/', OTPLoginVerificationView.as_view(), name='otp-login-verification'),
+
+    # Profile Endpoints
+    path('profile/vendor/', VendorProfileView.as_view(), name='vendor-profile'),
+    path('profile/customer/', CustomerProfileView.as_view(), name='customer-profile'),
+
+    path('password-reset/', PasswordResetRequestView.as_view(), name='password-reset-request'),
+    path('password-reset-confirm/', PasswordResetConfirmView.as_view(), name='password-reset-confirm'),
+    path('logout/', LogoutView.as_view(), name='logout'),
+
+
+    path('addresses/', AddressListCreateView.as_view(), name='address-list-create'),
+    path('addresses/<int:pk>/', AddressDetailView.as_view(), name='address-detail'),
+
+    path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
+    path('token/verify/', TokenVerifyView.as_view(), name='token-verify'),
+
+]
+
+
+# File: authusers\tasks.py
+from celery import shared_task
+from django.core.mail import send_mail
+from django.utils.timezone import now
+from .models import TemporaryUser
+from datetime import timedelta
+from django.template.loader import render_to_string
+
+@shared_task
+def delete_expired_temp_users():
+    """Delete TemporaryUser records older than 5 minutes."""
+    expired_users = TemporaryUser.objects.filter(created_at__lt=now() - timedelta(minutes=1))
+    count = expired_users.count()
+    expired_users.delete()
+    return f"Deleted {count} expired TemporaryUser entries."
+
+@shared_task
+def send_email_task(subject, message, from_email, recipient_list, html_message=None):
+    """Asynchronous task to send an email."""
+    send_mail(
+        subject=subject,
+        message=message,
+        from_email=from_email,
+        recipient_list=recipient_list,
+        html_message=html_message,
+    )
+
+
+##################################################
+
+# App: banners
+# File: banners\models.py
+from django.db import models
+from products.models import Category
+from vendors.models import VendorDetails
+
+class BannerType(models.TextChoices):
+    PROMOTIONAL = 'PROMOTIONAL', 'Promotional'
+    CATEGORY = 'CATEGORY', 'Category'
+    VENDOR = 'VENDOR', 'Vendor'
+
+class Banner(models.Model):
+    title = models.CharField(max_length=255, blank=True, null=True, help_text="Title of the banner")
+    image = models.ImageField(upload_to="banners/", help_text="Image for the banner", null=True)  # Ensure image field is present
+    banner_type = models.CharField(
+        max_length=20, choices=BannerType.choices, help_text="Type of banner: Promotional, Category, or Vendor"
+    )
+    category = models.ForeignKey(
+        Category, on_delete=models.CASCADE, blank=True, null=True, help_text="Linked category for the banner"
+    )
+    vendor = models.ForeignKey(
+        VendorDetails, on_delete=models.CASCADE, blank=True, null=True, help_text="Linked vendor for the banner"
+    )
+    external_url = models.URLField(
+        blank=True, null=True, help_text="External URL for promotional banners"
+    )
+    priority = models.PositiveIntegerField(default=0, help_text="Priority of the banner for ordering")
+    is_active = models.BooleanField(default=True, help_text="Is the banner active?")
+    created_at = models.DateTimeField(auto_now_add=True, help_text="When the banner was created")
+    updated_at = models.DateTimeField(auto_now=True, help_text="When the banner was last updated")
+
+    class Meta:
+        ordering = ['-priority', 'created_at']  # Higher priority banners appear first
+
+    def __str__(self):
+        return f"{self.title or 'Untitled Banner'} - {self.banner_type}"
+
+class ScrollableBanner(models.Model):
+    title = models.CharField(max_length=255, blank=True, null=True, help_text="Title of the scrollable banner")
+    image = models.ImageField(upload_to="scrollable_banners/", help_text="Image for the scrollable banner", null=True)  # Ensure image field is present
+    external_url = models.URLField(
+        blank=True, null=True, help_text="External URL for the scrollable banner"
+    )
+    priority = models.PositiveIntegerField(default=0, help_text="Priority of the scrollable banner for ordering")
+    is_active = models.BooleanField(default=True, help_text="Is the scrollable banner active?")
+    created_at = models.DateTimeField(auto_now_add=True, help_text="When the scrollable banner was created")
+    updated_at = models.DateTimeField(auto_now=True, help_text="When the scrollable banner was last updated")
+
+    class Meta:
+        ordering = ['-priority', 'created_at']  # Higher priority banners appear first
+
+    def __str__(self):
+        return self.title or "Untitled Scrollable Banner"
+
+
+# File: banners\serializers.py
+from rest_framework import serializers
+from .models import Banner, ScrollableBanner
+
+class BannerSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    vendor_name = serializers.CharField(source='vendor.shop_name', read_only=True)
+
+    class Meta:
+        model = Banner
+        fields = [
+            'id',
+            'title',
+            'image',
+            'banner_type',
+            'category',
+            'category_name',
+            'vendor',
+            'vendor_name',
+            'external_url',
+            'priority',
+            'is_active',
+            'created_at',
+        ]
+
+
+class ScrollableBannerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ScrollableBanner
+        fields = [
+            'id',
+            'title',
+            'image',
+            'external_url',
+            'priority',
+            'is_active',
+            'created_at',
+        ]
+
+
+# File: banners\views.py
+from rest_framework.generics import ListCreateAPIView
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.filters import SearchFilter
+from .models import Banner, ScrollableBanner
+from .serializers import BannerSerializer, ScrollableBannerSerializer
+
+
+# Pagination Class for Banners
+class BannerPagination(PageNumberPagination):
+    page_size = 10  # Default number of items per page
+    page_size_query_param = 'page_size'  # Allow clients to control page size
+    max_page_size = 50  # Maximum page size limit
+
+
+class BannerListCreateView(ListCreateAPIView):
+    """
+    View to fetch all bottom banners (static banners linked to categories, vendors, or promotions).
+    Includes pagination, filtering by banner type, and POST support for creating banners.
+    """
+    queryset = Banner.objects.all().order_by('-priority', 'created_at')
+    serializer_class = BannerSerializer
+    pagination_class = BannerPagination
+    filter_backends = [SearchFilter]
+    search_fields = ['banner_type']  # Allow filtering by banner type (CATEGORY, VENDOR, PROMOTIONAL)
+
+
+class ScrollableBannerListCreateView(ListCreateAPIView):
+    """
+    View to fetch and create top scrollable banners.
+    Includes pagination and POST support for creating banners.
+    """
+    queryset = ScrollableBanner.objects.all().order_by('-priority', 'created_at')
+    serializer_class = ScrollableBannerSerializer
+    pagination_class = BannerPagination  # Optional pagination for scrollable banners
+
+
+# File: banners\urls.py
+from django.urls import path
+from .views import *
+
+urlpatterns = [
+    # URL for bottom banners (static banners linked to categories/vendors)
+    path('bottom-banners/', BannerListCreateView.as_view(), name='bottom-banners'),
+    
+    # URL for top scrollable banners (carousel)
+    path('scrollable-banners/', ScrollableBannerListCreateView.as_view(), name='scrollable-banners'),
+]
+
+
+##################################################
+
+# App: cart_orders
+# File: cart_orders\models.py
+from django.db import models
+from django.conf import settings
+from products.models import ProductVariant
+from django.utils.timezone import now
+from vendors.models import VendorDetails
+from authusers.models import Address
+from decimal import Decimal
+
+class Cart(models.Model):
+    """
+    Represents a shopping cart for a specific user.
+    """
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="cart",
+        help_text="The user associated with this cart."
+    )
+    created_at = models.DateTimeField(auto_now_add=True, help_text="The date and time when the cart was created.")
+    updated_at = models.DateTimeField(auto_now=True, help_text="The date and time when the cart was last updated.")
+    last_reminder_sent = models.DateTimeField(
+        null=True, 
+        blank=True, 
+        help_text="The date and time when the last reminder email was sent."
+    )
+
+
+    def __str__(self):
+        return f"Cart for {self.user.email}"
+
+
+class CartItem(models.Model):
+    """
+    Represents an individual item in a cart.
+    """
+    cart = models.ForeignKey(
+        Cart,
+        on_delete=models.CASCADE,
+        related_name="items",
+        help_text="The cart this item belongs to."
+    )
+    product_variant = models.ForeignKey(
+        ProductVariant,
+        on_delete=models.CASCADE,
+        related_name="cart_items",
+        help_text="The specific product variant added to the cart."
+    )
+    quantity = models.PositiveIntegerField(
+        default=1, 
+        help_text="The quantity of this product in the cart."
+    )
+    added_at = models.DateTimeField(
+        auto_now_add=True, 
+        help_text="The date and time when the item was added to the cart."
+    )
+
+    # Override save method to update Cart's updated_at field when a CartItem is changed
+    def save(self, *args, **kwargs):
+        """
+        Override save to update the cart's updated_at field whenever a cart item is modified.
+        """
+        super().save(*args, **kwargs)
+        self.cart.updated_at = now()
+        self.cart.save(update_fields=["updated_at"])  # Update only the updated_at field
+
+    def __str__(self):
+        return f"{self.quantity} x {self.product_variant.product.name}"
+
+    def get_subtotal(self):
+        """
+        Calculate the subtotal for this item (offer_price * quantity).
+        """
+        return self.product_variant.offer_price * self.quantity
+
+
+
+
+
+class Order(models.Model):
+    """
+    Represents an order placed by a customer.
+    """
+    PAYMENT_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('paid', 'Paid'),
+        ('failed', 'Failed'),
+        ('cod_pending', 'COD Pending'),
+        ('cod_paid', 'COD Paid'),
+        ('cancelled', 'Cancelled'),
+    ]
+
+    ORDER_STATUS_CHOICES = [
+        ('placed', 'Order Placed'),            #vendor ------conform ---------vendor packed ready -ready to pickup!!------
+        ('shipped', 'Shipped'),
+        ('delivered', 'Delivered'),
+        ('cancelled', 'Cancelled'),
+        ('returned', 'Returned'),
+    ]
+
+    customer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="orders",
+        help_text="The customer who placed the order."
+    )
+    address = models.ForeignKey(
+        Address,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="orders",
+        help_text="The address used for this order."
+    )
+    total_price = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        help_text="Total price of the order."
+    )
+    payment_status = models.CharField(
+        max_length=15,
+        choices=PAYMENT_STATUS_CHOICES,
+        default='pending',
+        help_text="Payment status for the order."
+    )
+    order_status = models.CharField(
+        max_length=15,
+        choices=ORDER_STATUS_CHOICES,
+        default='placed',
+        help_text="Current status of the order."
+    )
+    cod_remittance_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Date when COD payment was remitted."
+    )
+    cod_payment_received = models.BooleanField(
+        default=False,
+        help_text="Indicates whether COD payment has been received."
+    )
+    created_at = models.DateTimeField(auto_now_add=True, help_text="Timestamp when the order was created")  # Track order creation time
+    updated_at = models.DateTimeField(auto_now=True)
+    razorpay_order_id = models.CharField(max_length=100, null=True, blank=True)
+
+    def __str__(self):
+        return f"Order #{self.id} - {self.customer.email}"
+
+
+
+
+class OrderItem(models.Model):
+    """
+    Represents an individual item in an order.
+    """
+    PAYMENT_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('paid', 'Paid'),
+        ('failed', 'Failed'),
+    ]
+    
+    ORDER_STATUS_CHOICES = [
+        ('confirmed', 'Confirmed'),
+        ('packed', 'Packed'),
+        ('warehouse', 'Warehouse'),
+        ("shiped", 'Shipped'),
+        ('delivered', 'Delivered'),
+        ('cancelled', 'Cancelled'),
+        ('returned', 'Returned'),
+    ]
+
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name="items",
+        help_text="The order this item belongs to."
+    )
+    product_variant = models.ForeignKey(
+        ProductVariant,
+        on_delete=models.CASCADE,
+        related_name="order_items",
+        help_text="The specific product variant purchased."
+    )
+    quantity = models.PositiveIntegerField(help_text="The quantity of this product purchased.")
+    price = models.DecimalField(max_digits=10, decimal_places=2, help_text="Price of the product at the time of purchase.")
+    vendor = models.ForeignKey(
+        VendorDetails,
+        on_delete=models.CASCADE,
+        related_name="order_items",
+        help_text="The vendor associated with this product.",
+        null=True,
+        blank=True,
+    )
+    payment_status = models.CharField(
+        max_length=10,
+        choices=PAYMENT_STATUS_CHOICES,
+        default='pending',
+        help_text="Payment status for the order."
+    )
+    order_status = models.CharField(
+        max_length=20,
+        choices=ORDER_STATUS_CHOICES,
+        default='confirmed',
+        help_text="Status of the order item."
+    )
+    created_at = models.DateTimeField(auto_now_add=True, help_text="The date and time when this item was added to the order.")
+    updated_at = models.DateTimeField(auto_now=True, help_text="The date and time when this item was last updated.")
+    delivery_date = models.DateTimeField(null=True, blank=True)  # Allow NULL values,)
+
+    def save(self, *args, **kwargs):
+        """
+        Automatically set the vendor based on the product variant's product vendor.
+        Calculates and updates commission details for the order item.
+        """
+        if not self.vendor:
+            # Ensure the vendor is set based on the product variant's product
+            self.vendor = self.product_variant.product.vendor
+
+        super().save(*args, **kwargs)  # Save the OrderItem instance first
+
+        # ---------------- NEW UPDATE: Commission and GST Calculation ----------------
+        from commission_and_calculations.models import CommissionAndGST
+        from commission_and_calculations.calculations import calculate_commission_and_gst
+
+
+        # Fetch product price from the linked ProductVariant
+        product_price = self.product_variant.offer_price
+
+        # Call the utility function to calculate commission details
+        calculations = calculate_commission_and_gst(product_price)
+
+        # Create or update the CommissionAndGST record
+        CommissionAndGST.objects.update_or_create(
+            order_item=self,
+            defaults={
+                "product": self.product_variant.product,
+                "vendor": self.vendor,
+                "product_price": product_price,
+                "commission_rate": calculations["commission_rate"],
+                "commission_amount": calculations["commission_amount"],
+                "gst_on_commission": calculations["gst_on_commission"],
+                "platform_charges": calculations["platform_charges"],
+                "total_deduction": calculations["total_deduction"],
+                "vendor_earnings": calculations["vendor_earnings"],
+            }
+        )
+        # ------------------------------------------------------------------
+
+    def update_status(self, new_status):
+        """
+        Updates the status of the order item with validation for allowed transitions.
+        """
+        valid_transitions = {
+            'confirmed': ['packed'],
+            'packed': ['ready_to_pick_up'],
+        }
+        if new_status in valid_transitions.get(self.order_status, []):
+            self.order_status = new_status
+            self.save()
+            return True
+        return False
+
+    def __str__(self):
+        return f"{self.quantity} x {self.product_variant.product.name} in Order #{self.order.id}"
+
+
+
+
+class SubOrder(models.Model):
+    """
+    Represents a sub-order for vendor-specific products in a multi-vendor order.
+    """
+    order = models.ForeignKey(
+        Order,
+        on_delete=models.CASCADE,
+        related_name="sub_orders",
+        help_text="The main order this sub-order belongs to."
+    )
+    vendor = models.ForeignKey(
+        VendorDetails,
+        on_delete=models.CASCADE,
+        related_name="sub_orders",
+        help_text="The vendor associated with this sub-order."
+    )
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, help_text="Subtotal for the vendor-specific items.")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"SubOrder #{self.id} for {self.vendor.user.email} (Order #{self.order.id})"
+
+
+from django.utils.timezone import now
+from decimal import Decimal
+from datetime import timedelta
+
+class DeliveryDetail(models.Model):
+    order = models.OneToOneField(Order, on_delete=models.CASCADE, related_name="delivery_detail")
+    address = models.ForeignKey(Address, on_delete=models.CASCADE, related_name="delivery_details")
+    expected_delivery_date = models.DateField()
+    delivery_charges = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    platform_price = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    overall_price = models.DecimalField(max_digits=10, decimal_places=2, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)  # Automatically set on creation
+
+    def save(self, *args, **kwargs):
+        """
+        Calculate the overall price dynamically before saving.
+        """
+        if not self.expected_delivery_date:
+            self.expected_delivery_date = now().date() + timedelta(days=7)
+
+        # Ensure all values are Decimal
+        self.delivery_charges = Decimal(self.delivery_charges)
+        self.platform_price = Decimal(self.platform_price)
+        self.overall_price = Decimal(self.order.total_price) + self.delivery_charges + self.platform_price
+        super().save(*args, **kwargs)
+
+
+# File: cart_orders\serializers.py
+from rest_framework import serializers
+from .models import *
+from products.serializers import ProductVariantSerializer
+from vendors.serializers import SimplifiedVendorSerializer
+from authusers.serializers import AddressSerializer
+
+# ================================
+# Cart Serializers
+# ================================
+class CartItemSerializer(serializers.ModelSerializer):
+    """
+    Serializer for individual cart items.
+    Includes product details and calculates the subtotal for the item.
+    """
+    product_variant = ProductVariantSerializer(read_only=True)
+    product_variant_id = serializers.PrimaryKeyRelatedField(
+        queryset=CartItem.objects.all(),
+        source='product_variant',
+        write_only=True,
+    )
+    subtotal = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CartItem
+        fields = ['id', 'product_variant', 'product_variant_id', 'quantity', 'subtotal']
+
+    def get_subtotal(self, obj):
+        return obj.get_subtotal()
+
+
+class CartSerializer(serializers.ModelSerializer):
+    """
+    Serializer for the cart.
+    Includes nested cart items and calculates the total price of the cart.
+    """
+    items = CartItemSerializer(many=True, read_only=True)
+    total_price = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Cart
+        fields = ['id', 'user', 'items', 'total_price']
+
+    def get_total_price(self, obj):
+        return sum(item.get_subtotal() for item in obj.items.all())
+
+
+# ================================
+# Order Serializers
+# ================================
+from authusers.serializers import UserSerializer
+
+class OrderItemSerializer(serializers.ModelSerializer):
+    """
+    Serializer for individual order items.
+    Includes product variant details and order status.
+    """
+    product_variant = ProductVariantSerializer(read_only=True)
+    variant_image = serializers.SerializerMethodField()
+    product_variant_id = serializers.PrimaryKeyRelatedField(
+        queryset=ProductVariant.objects.all(),  # Fixed queryset to use ProductVariant
+        source="product_variant",
+        write_only=True,
+    )
+    customer = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OrderItem
+        fields = [
+            'id', 
+            'customer', 
+            'product_variant', 
+            'product_variant_id', 
+            'quantity', 
+            'price', 
+            'order_status',  # Added the order_status field
+            'created_at', 
+            'updated_at',
+            'variant_image',  # Include this field for the image
+        ]
+        read_only_fields = ['id', 'order_status', 'created_at', 'updated_at']  # Made order_status read-only
+
+    def get_customer(self, obj):
+        """
+        Fetch customer details from the related order.
+        """
+        user = obj.order.customer
+        return UserSerializer(user).data
+    def get_variant_image(self, obj):
+        """
+        Retrieve the first image for the specific product variant.
+        """
+        if obj.product_variant.images.exists():
+            return obj.product_variant.images.first().image.url  # Fetch the first image's URL
+        return None  # Return None if no image exists
+
+class SubOrderSerializer(serializers.ModelSerializer):
+    """
+    Serializer for vendor-specific sub-orders.
+    Includes simplified vendor details and items.
+    """
+    vendor = SimplifiedVendorSerializer(read_only=True)
+    items = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SubOrder
+        fields = ['id', 'vendor', 'subtotal', 'items']
+
+    def get_items(self, obj):
+        # Get all items in the sub-order
+        order_items = obj.order.items.filter(product_variant__product__vendor=obj.vendor)
+        print("Order Items:", order_items)  # Check the fetched items
+        return OrderItemSerializer(order_items, many=True).data
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    """
+    Serializer for the main order.
+    Includes all items and sub-orders.
+    """
+    items = OrderItemSerializer(many=True, read_only=True)
+    sub_orders = SubOrderSerializer(many=True, read_only=True)
+    address = AddressSerializer(read_only=True)  # Include address details
+
+    class Meta:
+        model = Order
+        fields = ['id', 'customer', 'total_price', 'payment_status', 'created_at', 'updated_at', 'items', 'sub_orders', 'address','created_at', 'updated_at',] # Include created_at
+
+        read_only_fields = ['customer', 'total_price', 'payment_status', 'created_at', 'updated_at']
+
+
+
+
+class AddressSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Address
+        fields = ['id', 'full_name', 'phone_number', 'address_line_1', 'address_line_2', 'city', 'state', 'postal_code', 'country']
+
+from authusers.serializers import AddressSerializer
+
+class DeliveryDetailSerializer(serializers.ModelSerializer):
+    address = AddressSerializer(read_only=True)  # Nested serializer to include full address details
+    address_details = serializers.JSONField(write_only=True, required=False)  # Write-only for dynamic address creation
+
+    class Meta:
+        model = DeliveryDetail
+        fields = ['id', 'order', 'address', 'address_details', 'expected_delivery_date', 'delivery_charges', 'platform_price', 'overall_price']
+        read_only_fields = ['expected_delivery_date', 'overall_price']
+
+    def __init__(self, *args, **kwargs):
+        """
+        Initialize the serializer and dynamically set the queryset for the `address` field.
+        """
+        super().__init__(*args, **kwargs)
+        if 'request' in self.context:
+            user = self.context['request'].user
+            self.fields['address'].queryset = Address.objects.filter(user=user)  # Filter addresses for the logged-in user
+
+    def validate(self, data):
+        """
+        Ensure either `address` or `address_details` is provided.
+        """
+        if not data.get('address') and not data.get('address_details'):
+            raise serializers.ValidationError("Either `address` or `address_details` must be provided.")
+        return data
+
+    def handle_address_creation(self, validated_data):
+        """
+        Handle the creation of a new address if `address_details` are provided.
+        """
+        address = validated_data.pop('address', None)
+        address_details = validated_data.pop('address_details', None)
+
+        if address_details:
+            # Create a new address if `address_details` are provided
+            address = Address.objects.create(user=self.context['request'].user, **address_details)
+
+        return address
+
+    def create(self, validated_data):
+        """
+        Create a new `DeliveryDetail` instance and handle dynamic address creation.
+        """
+        address = self.handle_address_creation(validated_data)  # Create address if necessary
+        return DeliveryDetail.objects.create(address=address, **validated_data)
+
+    def update(self, instance, validated_data):
+        """
+        Update an existing `DeliveryDetail` instance and handle dynamic address creation.
+        """
+        address = self.handle_address_creation(validated_data)  # Create address if necessary
+
+        if address:
+            instance.address = address  # Update the instance's address
+
+        # Update other fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        instance.save()
+        return instance
+
+
+
+
+from rest_framework import serializers
+
+class RetryPaymentSerializer(serializers.Serializer):
+    order_id = serializers.IntegerField(help_text="The ID of the order to retry payment for")
+    callback_url = serializers.URLField(
+        help_text="The URL to which Razorpay will redirect after payment"
+    )
+
+    def validate(self, data):
+        """
+        Add any custom validation logic if needed.
+        """
+        if not data.get('callback_url'):
+            raise serializers.ValidationError(
+                {"callback_url": "This field is required."}
+            )
+        return data
+
+
+# File: cart_orders\views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from .models import *
+from .serializers import *
+from products.models import ProductVariant
+from django.shortcuts import get_object_or_404
+from ecommerce_platform import settings
+from .tasks import update_payment_status
+
+class CartView(APIView):
+    """
+    Retrieve the current user's cart or update it by adding/updating/removing items.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """
+        Retrieve the current user's cart.
+        """
+        cart, created = Cart.objects.get_or_create(user=request.user)
+        serializer = CartSerializer(cart)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        """
+        Add a product variant to the cart or update its quantity.
+        """
+        cart, created = Cart.objects.get_or_create(user=request.user)
+        data = request.data
+        product_variant = get_object_or_404(ProductVariant, id=data.get('product_variant_id'))
+        quantity = data.get('quantity', 1)
+
+        if quantity < 1:
+            return Response({"error": "Quantity must be at least 1."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check if the item already exists in the cart
+        cart_item, item_created = CartItem.objects.get_or_create(cart=cart, product_variant=product_variant)
+
+        if not item_created:  # Item already exists, update the quantity
+            cart_item.quantity += quantity
+        else:  # New item added
+            cart_item.quantity = quantity
+
+        cart_item.save()
+        serializer = CartItemSerializer(cart_item)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def patch(self, request):
+        """
+        Update the quantity of an item in the cart.
+        """
+        cart = get_object_or_404(Cart, user=request.user)
+        data = request.data
+        cart_item = get_object_or_404(CartItem, id=data.get('cart_item_id'), cart=cart)
+        new_quantity = data.get('quantity')
+
+        if new_quantity is None or new_quantity < 1:
+            cart_item.delete()  # Remove item if quantity is invalid or zero
+            return Response({"message": "Cart item removed."}, status=status.HTTP_200_OK)
+
+        cart_item.quantity = new_quantity
+        cart_item.save()
+        serializer = CartItemSerializer(cart_item)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def delete(self, request):
+        """
+        Remove an item from the cart.
+        """
+        cart = get_object_or_404(Cart, user=request.user)
+        cart_item = get_object_or_404(CartItem, id=request.data.get('cart_item_id'), cart=cart)
+        cart_item.delete()
+        return Response({"message": "Cart item removed."}, status=status.HTTP_200_OK)
+
+
+
+
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from .models import Cart, CartItem, Order, OrderItem, SubOrder
+from .serializers import OrderSerializer
+from django.db import transaction
+from products.models import ProductVariant
+from .models import Cart, Order, OrderItem, SubOrder
+from authusers.models import Address
+from authusers.serializers import AddressSerializer
+from django.shortcuts import get_object_or_404
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
+from django.shortcuts import get_object_or_404
+from django.db import transaction
+from django.utils.timezone import now
+from cart_orders.models import Cart, Order, OrderItem, SubOrder, DeliveryDetail
+from cart_orders.serializers import OrderSerializer, AddressSerializer
+from authusers.models import Address
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from django.shortcuts import get_object_or_404
+from django.db import transaction
+from django.utils.timezone import now
+from .models import Cart, CartItem, Order, OrderItem, SubOrder, DeliveryDetail
+from .serializers import OrderSerializer, AddressSerializer
+from authusers.models import Address
+
+class CheckoutView(APIView):
+    """
+    Handles the checkout process, including stock validation, order creation,
+    address handling, and managing sub-orders for vendors.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, order_id=None):
+        """
+        Retrieve the user's active cart or a specific order by ID.
+        """
+        if order_id:
+            # Retrieve a specific order by ID
+            order = Order.objects.filter(customer=request.user, id=order_id).first()
+            if not order:
+                return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+
+            serializer = OrderSerializer(order)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        # Retrieve the user's active cart
+        cart = Cart.objects.filter(user=request.user).first()
+        if not cart or not cart.items.exists():
+            return Response({"error": "Cart is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+        cart_items = cart.items.all()
+        cart_data = []
+
+        for item in cart_items:
+            cart_data.append({
+                "product_variant": item.product_variant.id,
+                "product_name": item.product_variant.product.name,
+                "quantity": item.quantity,
+                "price": item.product_variant.offer_price,
+                "subtotal": item.get_subtotal(),
+            })
+
+        total_price = sum(item.get_subtotal() for item in cart_items)
+
+        return Response({
+            "cart_items": cart_data,
+            "total_price": total_price
+        }, status=status.HTTP_200_OK)
+
+    @transaction.atomic
+    def post(self, request):
+        """
+        Validates stock, creates an order, associates an address, and clears the cart upon successful checkout.
+        """
+        cart = Cart.objects.filter(user=request.user).first()
+
+        if not cart or not cart.items.exists():
+            return Response({"error": "Cart is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Handle address selection or creation
+        address_id = request.data.get('address_id')
+        if address_id:
+            address = get_object_or_404(Address, id=address_id, user=request.user)
+        else:
+            address_data = request.data.get('address')
+            if not address_data:
+                return Response({"error": "Address information is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+            address_serializer = AddressSerializer(data=address_data, context={'request': request})
+            if address_serializer.is_valid():
+                address = address_serializer.save()
+            else:
+                return Response(address_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate stock availability
+        cart_items = cart.items.all()
+        insufficient_stock_items = []
+
+        for item in cart_items:
+            if item.quantity > item.product_variant.stock:
+                insufficient_stock_items.append({
+                    "product_variant": item.product_variant.id,
+                    "available_stock": item.product_variant.stock,
+                    "requested_quantity": item.quantity
+                })
+
+        if insufficient_stock_items:
+            return Response({
+                "error": "Insufficient stock for some items.",
+                "details": insufficient_stock_items
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Calculate total price
+        total_price = sum(item.get_subtotal() for item in cart_items)
+
+        # Determine payment mode
+        payment_mode = request.data.get('payment_mode', 'prepaid')
+        print(f"Received payment_mode: {payment_mode}")  # Debugging log
+
+        # Determine payment status based on payment mode
+        payment_status = "cod_pending" if payment_mode.upper() == "COD" else "pending"
+        print(f"Setting payment_status to: {payment_status}")  # Debugging log
+
+        # Create the main order
+        order = Order.objects.create(
+            customer=request.user,
+            total_price=total_price,
+            payment_status=payment_status,
+            address=address
+        )
+        print(f"Order created with payment_status: {order.payment_status}")  # Debugging log
+
+        # Create order items and sub-orders
+        vendor_subtotals = {}
+        for item in cart_items:
+            # Deduct stock
+            product_variant = item.product_variant
+            product_variant.stock -= item.quantity
+            product_variant.save()
+
+            # Create order item
+            OrderItem.objects.create(
+                order=order,
+                product_variant=product_variant,
+                quantity=item.quantity,
+                price=product_variant.offer_price
+            )
+
+            # Track vendor-specific subtotals
+            vendor = product_variant.product.vendor
+            if vendor in vendor_subtotals:
+                vendor_subtotals[vendor] += item.get_subtotal()
+            else:
+                vendor_subtotals[vendor] = item.get_subtotal()
+
+        # Create sub-orders
+        for vendor, subtotal in vendor_subtotals.items():
+            SubOrder.objects.create(order=order, vendor=vendor, subtotal=subtotal)
+
+        # Create delivery details
+        DeliveryDetail.objects.create(
+            order=order,
+            address=address,
+            delivery_charges=50.00,  # Example delivery charge
+            platform_price=20.00,  # Example platform charge
+        )
+
+        # Clear the cart
+        cart.items.all().delete()
+
+        # Serialize and return the order
+        serializer = OrderSerializer(order)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+
+
+############# Delivery Details 
+
+
+class DeliveryDetailView(APIView):
+    """
+    Handles CRUD operations for delivery details.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        """Limit delivery details to those associated with the logged-in user."""
+        return DeliveryDetail.objects.filter(order__customer=self.request.user)
+
+    def get(self, request, pk=None):
+        """Retrieve delivery details (list or single)."""
+        if pk:
+            try:
+                delivery_detail = self.get_queryset().get(pk=pk)
+            except DeliveryDetail.DoesNotExist:
+                return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+            serializer = DeliveryDetailSerializer(delivery_detail, context={"request": request})
+            return Response(serializer.data)
+
+        delivery_details = self.get_queryset()
+        serializer = DeliveryDetailSerializer(delivery_details, many=True, context={"request": request})
+        return Response(serializer.data)
+
+    def post(self, request):
+        """Create a delivery detail entry."""
+        serializer = DeliveryDetailSerializer(data=request.data, context={"request": request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def patch(self, request, pk=None):
+        """Update an existing delivery detail."""
+        if not pk:
+            return Response({"detail": "Method not allowed without specifying a resource."}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+        try:
+            delivery_detail = self.get_queryset().get(pk=pk)
+        except DeliveryDetail.DoesNotExist:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = DeliveryDetailSerializer(delivery_detail, data=request.data, partial=True, context={"request": request})
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
+from django.shortcuts import get_object_or_404
+from django.db import transaction
+from .models import Cart, Order, OrderItem, DeliveryDetail
+from .serializers import OrderSerializer, AddressSerializer
+from authusers.models import Address
+
+class BuyNowView(APIView):
+    """
+    Handles the flow for 'Buy Now': creating an order, order items, and delivery details.
+    """
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request):
+        """
+        Validate stock, create an order, associate an address, and clear the cart upon successful checkout.
+        """
+        # Get the cart
+        cart = Cart.objects.filter(user=request.user).first()
+
+        if not cart or not cart.items.exists():
+            return Response({"error": "Cart is empty."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Handle address selection or creation
+        address_id = request.data.get('address_id')
+        if address_id:
+            # Use an existing address
+            address = get_object_or_404(Address, id=address_id, user=request.user)
+        else:
+            # Create a new address
+            address_data = request.data.get('address')
+            if not address_data:
+                return Response({"error": "Address information is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+            address_serializer = AddressSerializer(data=address_data, context={'request': request})
+            if address_serializer.is_valid():
+                address = address_serializer.save()
+            else:
+                return Response(address_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate stock availability
+        cart_items = cart.items.all()
+        insufficient_stock_items = []
+
+        for item in cart_items:
+            if item.quantity > item.product_variant.stock:
+                insufficient_stock_items.append({
+                    "product_variant": item.product_variant.id,
+                    "available_stock": item.product_variant.stock,
+                    "requested_quantity": item.quantity
+                })
+
+        if insufficient_stock_items:
+            return Response(
+                {"error": "Insufficient stock for some items.", "details": insufficient_stock_items},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Calculate total price
+        total_price = sum(item.get_subtotal() for item in cart_items)
+
+        # Determine payment mode
+        payment_mode = request.data.get('payment_mode', 'prepaid')
+        print(f"Received payment_mode: {payment_mode}")  # Debugging
+
+        # Determine payment status based on payment mode
+        payment_status = "cod_pending" if payment_mode == "COD" else "pending"
+
+        # Create the main order
+        order = Order.objects.create(
+            customer=request.user,
+            total_price=total_price,
+            payment_status=payment_status,
+            address=address
+        )
+        print(f"Order created with payment_status: {order.payment_status}")  # Debugging
+
+        # Create order items
+        for item in cart_items:
+            # Deduct stock
+            product_variant = item.product_variant
+            product_variant.stock -= item.quantity
+            product_variant.save()
+
+            # Create order item
+            OrderItem.objects.create(
+                order=order,
+                product_variant=product_variant,
+                quantity=item.quantity,
+                price=product_variant.offer_price
+            )
+
+        # Create delivery details
+        DeliveryDetail.objects.create(
+            order=order,
+            address=address,
+            delivery_charges=50.00,  # Example delivery charge
+            platform_price=20.00,  # Example platform charge
+        )
+
+        # Clear the cart
+        cart.items.all().delete()
+
+        # Serialize the order
+        serializer = OrderSerializer(order)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+
+
+import razorpay
+
+
+class PaymentInitializationView(APIView):
+    """
+    Generates Razorpay payment order_id for a given order.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        try:
+            # Extract `order_id` from request
+            order_id = request.data.get("order_id")
+            if not order_id:
+                return Response({"error": "Order ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Fetch the order
+            order = get_object_or_404(Order, id=order_id, customer=request.user)
+
+            # Ensure the order is still pending payment
+            if order.payment_status != "pending":
+                return Response({"error": "Payment is already completed or invalid for this order."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Razorpay client initialization
+            razorpay_client = razorpay.Client(auth=("rzp_test_EVswR8OHh71h2F", "PY7vpZUFrdPBupe01k8fJb7F"))
+
+            # Generate payment order
+            amount = int(order.total_price * 100)  # Convert to paise
+            payment_order = razorpay_client.order.create(
+                {
+                    "amount": amount,
+                    "currency": "INR",
+                    "receipt": f"order_{order.id}",
+                    "payment_capture": 1,  # Auto-capture enabled
+                }
+            )
+            order.payment_status = "Paid"
+            order.razorpay_order_id = payment_order["id"]
+            print(order)
+            order.save()
+
+            # Return Razorpay details to the frontend
+            return Response(
+                {
+                    "razorpay_order_id": payment_order["id"],
+                    "amount": payment_order["amount"],
+                    "currency": payment_order["currency"],
+                    "key": "rzp_test_EVswR8OHh71h2F",  # Provide the Razorpay API Key for frontend
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except razorpay.errors.BadRequestError as e:
+
+            order_id = request.data.get("order_id")
+            if not order_id:
+                return Response({"error": "Order ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Fetch the order
+            order = get_object_or_404(Order, id=order_id, customer=request.user)
+            print(order)
+
+            return Response({"error": "Razorpay BadRequestError", "details": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            # Handle unexpected errors
+            return Response({"error": "An unexpected error occurred.", "details": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+from django.template.loader import render_to_string
+from django.core.mail import send_mail
+from celery import shared_task
+from cart_orders.tasks import send_order_placed_email
+
+class PaymentVerificationView(APIView):
+    """
+    Verifies Razorpay payment and updates the order status.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        # Extract payment details
+        order_id = request.data.get("order_id")
+        razorpay_order_id = request.data.get("razorpay_order_id")
+        payment_id = request.data.get("razorpay_payment_id")
+        signature = request.data.get("razorpay_signature")
+
+        if not all([order_id, payment_id, signature]):
+            return Response({"error": "Incomplete payment details provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Fetch the order
+        order = get_object_or_404(Order, id=order_id, customer=request.user)
+
+        # Verify the Razorpay payment signature
+        razorpay_client = razorpay.Client(auth=("rzp_test_EVswR8OHh71h2F", "PY7vpZUFrdPBupe01k8fJb7F"))
+        try:
+            razorpay_client.utility.verify_payment_signature(
+                {
+                    "razorpay_order_id": razorpay_order_id,
+                    "razorpay_payment_id": payment_id,
+                    "razorpay_signature": signature,
+                }
+            )
+            # Update the order's payment status
+            order.payment_status = "paid"
+            order.save()
+
+            # Update payment status for related order items
+            update_payment_status(order_id)
+
+            # Trigger the email task
+            send_order_placed_email.delay(order.id)
+
+        except razorpay.errors.SignatureVerificationError:
+            return Response({"error": "Payment verification failed."}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({"message": "Payment verified successfully."}, status=status.HTTP_200_OK)
+
+
+
+class OrderItemListView(APIView):
+    """
+    View to list all order items for a specific order.
+    """
+    permission_classes = [IsAuthenticated]  # Only authenticated users can access
+
+    def get(self, request, order_id):
+        # Get the order by ID and ensure it belongs to the requesting user
+        order = get_object_or_404(Order, id=order_id, customer=request.user)
+
+        # Fetch all items related to this order
+        order_items = order.items.all()
+
+        # Serialize the order items
+        serializer = OrderItemSerializer(order_items, many=True)
+
+        # Return the serialized data
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from cart_orders.models import Order
+import razorpay
+from django.conf import settings
+
+class RetryPaymentView(APIView):
+    """
+    Handles payment retries for failed or pending orders.
+    """
+
+    def post(self, request, *args, **kwargs):
+        try:
+            # Fetch the order ID and callback URL from the request
+            order_id = request.data.get("order_id")
+            callback_url = request.data.get("callback_url")
+
+            if not order_id:
+                return Response({"error": "Order ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+            if not callback_url:
+                return Response({"error": "Callback URL is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Fetch the order
+            order = Order.objects.get(id=order_id)
+
+            # Check if the payment status allows retry
+            if order.payment_status not in ['failed', 'pending']:
+                return Response({"error": "Payment cannot be retried for this order."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Razorpay client setup
+            razorpay_client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
+
+            # Create a new payment link for the existing order
+            payment_link = razorpay_client.payment_link.create({
+                "amount": int(order.total_price * 100),  # Convert to paise
+                "currency": "INR",
+                "description": f"Retry payment for Order #{order.id}",
+                "callback_url": callback_url,  # Use the callback URL from the request
+                "callback_method": "get"
+            })
+
+            # Update the order status
+            order.payment_status = "retrying"
+            order.save()
+
+            return Response({
+                "message": "Payment link generated successfully.",
+                "payment_link": payment_link['short_url']
+            }, status=status.HTTP_200_OK)
+
+        except Order.DoesNotExist:
+            return Response({"error": "Order not found."}, status=status.HTTP_404_NOT_FOUND)
+        except razorpay.errors.RazorpayError as e:
+            return Response({"error": f"Razorpay Error: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"error": f"Internal Server Error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from django.http import HttpResponse
+from cart_orders.models import OrderItem
+
+
+def generate_shipping_label(request, order_item_id):
+    """
+    Generate a shipping label for a specific order item.
+    """
+    try:
+        # Fetch the order item using the provided order_item_id
+        order_item = OrderItem.objects.get(id=order_item_id, payment_status='paid')
+
+        # Extract details
+        customer_details = {
+            "name": f"{order_item.order.customer.first_name} {order_item.order.customer.last_name}",
+            "email": order_item.order.customer.email,
+            "phone_number": order_item.order.customer.phone_number
+        }
+
+        delivery_address = {
+            "full_name": order_item.order.delivery_detail.address.full_name,
+            "address_line_1": order_item.order.delivery_detail.address.address_line_1,
+            "address_line_2": order_item.order.delivery_detail.address.address_line_2,
+            "city": order_item.order.delivery_detail.address.city,
+            "state": order_item.order.delivery_detail.address.state,
+            "postal_code": order_item.order.delivery_detail.address.postal_code,
+            "country": order_item.order.delivery_detail.address.country
+        }
+
+        product_variant = order_item.product_variant
+
+    except OrderItem.DoesNotExist:
+        return HttpResponse("Order item not found or payment not completed.", status=404)
+
+    # Create an HTTP response with a PDF mimetype
+    response = HttpResponse(content_type='application/pdf')
+    response['Content-Disposition'] = f'inline; filename="shipping_label_{order_item_id}.pdf"'
+
+    # Initialize ReportLab canvas
+    c = canvas.Canvas(response, pagesize=letter)
+    width, height = letter
+
+    # Draw sections as per the second image template
+    c.setFont("Helvetica-Bold", 12)
+
+    # Ship to Section
+    c.drawString(40, height - 50, "SHIP TO:")
+    c.setFont("Helvetica", 10)
+    c.drawString(40, height - 70, delivery_address["full_name"])
+    c.drawString(40, height - 90, delivery_address["address_line_1"])
+    if delivery_address["address_line_2"]:
+        c.drawString(40, height - 110, delivery_address["address_line_2"])
+    c.drawString(40, height - 130, f"{delivery_address['city']}, {delivery_address['state']}")
+    c.drawString(40, height - 150, f"{delivery_address['postal_code']}, {delivery_address['country']}")
+
+    # From Section
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(300, height - 50, "FROM:")
+    c.setFont("Helvetica", 10)
+    c.drawString(300, height - 70, "ACME Corporation")
+    c.drawString(300, height - 90, "456 Industrial Blvd")
+    c.drawString(300, height - 110, "Los Angeles, 90001, USA")
+
+    # Order Details Section
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(40, height - 180, "ORDER DETAILS:")
+    c.setFont("Helvetica", 10)
+    c.drawString(40, height - 200, f"Order ID: {order_item.id}")
+    c.drawString(40, height - 220, f"Weight: 2.5 KG")  # Replace with dynamic weight if available
+    c.drawString(40, height - 240, "Dimensions: 12cm x 12cm x 12cm")  # Replace with dynamic dimensions
+    c.drawString(40, height - 260, f"Shipping Date: {order_item.updated_at.strftime('%Y-%m-%d')}")
+
+    # Remarks Section
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(300, height - 180, "REMARKS:")
+    c.setFont("Helvetica", 10)
+    c.drawString(300, height - 200, "NO REMARKS")
+
+    # Barcode Section
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, height - 300, "TRACKING NO:")
+    c.drawString(150, height - 300, f"TRACK{order_item.id}US")
+    c.drawString(40, height - 340, "-----------------------------------------")
+    c.drawString(40, height - 360, f"TRACK{order_item.id}US")
+
+    # Save the PDF
+    c.save()
+    return response
+
+import hmac
+import hashlib
+import json
+from django.http import JsonResponse, HttpResponseBadRequest
+from ecommerce_platform.settings import RAZORPAY_WEBHOOK_SECRET
+from rest_framework.permissions import AllowAny
+
+class RazorpayWebhookView(APIView):
+    permission_classes = [AllowAny] 
+    def get(self, request, *args, **kwargs):
+        return HttpResponse("Razorpay webhook received")
+    def post(self, request, *args, **kwargs):
+        # Get the webhook payload and signature from the headers
+        payload = request.body
+        received_signature = request.headers.get('X-Razorpay-Signature')
+
+        # Verify the signature
+        generated_signature = hmac.new(
+            bytes(RAZORPAY_WEBHOOK_SECRET, 'utf-8'),
+            msg=payload,
+            digestmod=hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(received_signature, generated_signature):
+            return HttpResponseBadRequest("Invalid webhook signature")
+
+        # Parse the payload
+        event = json.loads(payload)
+        event_type = event.get("event")
+
+        # Handle different event types
+# Handle different event types
+        if event_type == "payment.captured":
+            razorpay_order_id = event["payload"]["payment"]["entity"]["order_id"]  # Razorpay Order ID
+            payment_id = event["payload"]["payment"]["entity"]["id"]
+
+            # Update the payment status of the order
+            try:
+                # Match using razorpay_order_id instead of local order_id
+                order = Order.objects.get(razorpay_order_id=razorpay_order_id)
+                order.payment_status = "paid"
+                order.transaction_id = payment_id
+                order.save()
+            except Order.DoesNotExist:
+                return JsonResponse({"error": "Order not found"}, status=404)
+
+        elif event_type == "payment.failed":
+            razorpay_order_id = event["payload"]["payment"]["entity"]["order_id"]  # Razorpay Order ID
+            payment_id = event["payload"]["payment"]["entity"]["id"]
+
+            # Update the order status to "failed"
+            try:
+                order = Order.objects.get(razorpay_order_id=razorpay_order_id)
+                order.payment_status = "failed"
+                order.transaction_id = payment_id
+                order.save()
+            except Order.DoesNotExist:
+                return JsonResponse({"error": "Order not found"}, status=404)
+
+        # Return success response
+        return JsonResponse({"status": "success"}, status=200)
+
+# File: cart_orders\urls.py
+from django.urls import path
+from .views import *
+urlpatterns = [
+    path('cart/', CartView.as_view(), name='cart'),
+    path('checkout/', CheckoutView.as_view(), name='checkout'),
+    path('checkout/<int:order_id>/', CheckoutView.as_view(), name='checkout-detail'),
+    path('deliverydetails/', DeliveryDetailView.as_view(), name = 'delivery-detail'),
+    path('deliverydetails/<int:pk>/', DeliveryDetailView.as_view(), name='delivery-detail-specific'),
+    path('buynow/', BuyNowView.as_view(), name='Buy-Now'),
+    path('payment/init/', PaymentInitializationView.as_view(), name= 'payment-init'),   # razor pay payment initialization
+    path('retry-payment/', RetryPaymentView.as_view(), name='retry-payment'),
+    path('payment/verify/', PaymentVerificationView.as_view(), name= "payment-verify"),
+    path('orders/<int:order_id>/items/', OrderItemListView.as_view(), name='order-item-list'),
+    path('generate-shipping-label/<int:order_item_id>/', generate_shipping_label, name='generate_shipping_label'),
+    path('payment/webhook/', RazorpayWebhookView.as_view(), name='razorpay-webhook'),
+
+]
+
+
+# File: cart_orders\tasks.py
+from django.db import models  # Add this import
+from celery import shared_task  # Add this import for the shared_task decorator
+from django.conf import settings  # Import settings to use BASE_URL
+from django.utils.timezone import now, timedelta
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from .models import Cart, Order  # Import specific models used
+from ecommerce_platform.settings import EMAIL_HOST_USER
+
+from django.shortcuts import get_object_or_404
+
+def update_payment_status(order_id):
+    order = get_object_or_404(Order, id=order_id)  # Correct model reference
+    for item in order.items.all():  # Use `.all()` to retrieve related items
+        item.payment_status = "paid"  # Corrected typo
+        item.save()
+
+@shared_task
+def send_packed_email(order_id):
+    """
+    Celery task to send email notifications when an order is packed.
+    """
+    try:
+        order = Order.objects.get(id=order_id)
+
+        # Send email to customer
+        customer_email_body = render_to_string(
+            'emails/order_packed_customer.html',
+            {
+                'customer_name': order.customer.get_full_name(),
+                'order_id': order.id,
+                'year': now().year,
+            }
+        )
+        send_mail(
+            subject="Your order has been packed!",
+            message="",
+            from_email=EMAIL_HOST_USER,
+            recipient_list=[order.customer.email],
+            fail_silently=False,
+            html_message=customer_email_body,
+        )
+
+        # Send email to admin
+        admin_email_body = render_to_string(
+            'emails/order_packed_admin.html',
+            {
+                'vendor_name': order.vendor.user.get_full_name(),
+                'order_id': order.id,
+                'year': now().year,
+            }
+        )
+        send_mail(
+            subject=f"Vendor packed order #{order.id}",
+            message="",
+            from_email=EMAIL_HOST_USER,
+            recipient_list=["rerddyrebba72@gmail.com"],  # Admin email
+            fail_silently=False,
+            html_message=admin_email_body,
+        )
+
+        return f"Emails sent for order {order_id}"
+
+    except Order.DoesNotExist:
+        return f"Order {order_id} does not exist"
+
+def send_email(subject, message, recipient):
+    """
+    Utility function to send emails.
+    """
+    send_mail(
+        subject=subject,
+        message=message,
+        from_email=EMAIL_HOST_USER,
+        recipient_list=[recipient],
+        fail_silently=False,
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from celery import shared_task
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from cart_orders.models import Order
+from django.conf import settings
+
+@shared_task
+def send_order_placed_email(order_id):
+    """
+    Send an order confirmation email to the customer after successful payment.
+    """
+    try:
+        order = Order.objects.get(id=order_id)
+        subject = f"Order #{order.id} Confirmed!"
+        recipient = order.customer.email
+
+        # Render email content
+        email_body = render_to_string('emails/order_placed.html', {
+            'order': order,
+            'customer': order.customer,
+            'items': order.items.all(),
+            'total_price': order.total_price,
+        })
+
+        # Send the email
+        send_mail(
+            subject=subject,
+            message="",
+            from_email=settings.EMAIL_HOST_USER,
+            recipient_list=[recipient],
+            html_message=email_body,
+        )
+    except Order.DoesNotExist:
+        print(f"Order with ID {order_id} does not exist.")
+
+
+
+
+from celery import shared_task
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+from cart_orders.models import OrderItem
+from django.conf import settings
+
+@shared_task
+def send_order_status_email_task(order_item_id):
+    """
+    Send an email notification to the customer when the order status changes.
+    """
+    try:
+        order_item = OrderItem.objects.get(id=order_item_id)
+        customer_email = order_item.order.customer.email
+
+        subject = f"Order #{order_item.order.id} Status Update"
+        message = f"Your order item {order_item.product_variant.product.name} status has been updated to {order_item.order_status}."
+        
+        # Construct the customer's name
+        customer_name = f"{order_item.order.customer.first_name} {order_item.order.customer.last_name}".strip()
+        
+        # Use an email template for better formatting
+        html_message = render_to_string(
+            'emails/order_status_update.html',
+            {
+                'order_item': order_item,
+                'customer_name': customer_name,
+                'status': order_item.order_status,
+            }
+        )
+
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=settings.EMAIL_HOST_USER,
+            recipient_list=[customer_email],
+            fail_silently=False,
+            html_message=html_message,
+        )
+    except OrderItem.DoesNotExist:
+        print(f"OrderItem with ID {order_item_id} does not exist.")
+    except Exception as e:
+        print(f"An error occurred while sending the order status email: {str(e)}")
+
+
+
+
+
+
+@shared_task
+def delete_stale_orders():
+    """
+    Deletes orders that remain in 'pending' or 'failed' payment status for more than 5 minutes,
+    excluding COD orders (cod_pending).
+    """
+    from django.utils.timezone import now
+    from datetime import timedelta
+    from cart_orders.models import Order
+
+    threshold_time = now() - timedelta(minutes=1)  # Orders older than 5 minutes
+    stale_orders = Order.objects.filter(
+        payment_status__in=['pending', 'failed'],  # Exclude COD
+        created_at__lt=threshold_time
+    ).exclude(payment_status='cod_pending')  # Explicitly exclude COD orders
+
+    # Log orders being deleted for debugging
+    for order in stale_orders:
+        print(f"Deleting stale order: {order.id} - {order.payment_status}")
+
+    # Delete stale orders
+    stale_orders.delete()
+
+
+
+##################################################
+
+# App: commission_and_calculations
+# File: commission_and_calculations\models.py
+from django.db import models
+from cart_orders.models import OrderItem
+from products.models import Product
+from vendors.models import VendorDetails
+from .calculations import calculate_commission_and_gst
+
+class PriceRangeCommission(models.Model):
+    min_price = models.DecimalField(max_digits=10, decimal_places=2, help_text="Minimum price of the range")
+    max_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Maximum price of the range (leave blank for no upper limit)"
+    )
+    commission_rate = models.DecimalField(max_digits=5, decimal_places=2, help_text="Commission rate for this price range (in percentage)")
+    platform_charges = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        help_text="Platform charges as a fixed amount for this price range"
+    )
+
+    class Meta:
+        verbose_name = "Price Range Commission"
+        verbose_name_plural = "Price Range Commissions"
+
+    def __str__(self):
+        if self.max_price:
+            return f"{self.min_price} - {self.max_price}: {self.commission_rate}% Commission + ₹{self.platform_charges} Platform Charges"
+        return f"{self.min_price} and above: {self.commission_rate}% Commission + ₹{self.platform_charges} Platform Charges"
+
+
+
+class CommissionAndGST(models.Model):
+    order_item = models.OneToOneField(
+        OrderItem, on_delete=models.CASCADE, related_name="commission_details",
+        help_text="The specific order item linked to these commission details"
+    )
+    product = models.ForeignKey(
+        Product, on_delete=models.CASCADE, related_name="commission_details",
+        help_text="The product for which these details are calculated"
+    )
+    vendor = models.ForeignKey(
+        VendorDetails, on_delete=models.CASCADE, related_name="commission_details",
+        help_text="The vendor who owns the product"
+    )
+    product_price = models.DecimalField(
+        max_digits=10, decimal_places=2, help_text="Price of the product (inclusive of GST)"
+    )
+    commission_rate = models.DecimalField(
+        max_digits=5, decimal_places=2, help_text="Commission rate applied to this product"
+    )
+    commission_amount = models.DecimalField(
+        max_digits=10, decimal_places=2, help_text="Commission amount deducted based on the rate"
+    )
+    gst_on_commission = models.DecimalField(
+        max_digits=10, decimal_places=2, help_text="GST applied on the commission amount"
+    )
+    platform_charges = models.DecimalField(
+        max_digits=10, decimal_places=2, help_text="Platform charges for this product"
+    )
+    total_deduction = models.DecimalField(
+        max_digits=10, decimal_places=2, help_text="Total deductions (commission + GST + platform charges)"
+    )
+    vendor_earnings = models.DecimalField(
+        max_digits=10, decimal_places=2, help_text="Final earnings for the vendor after all deductions"
+    )
+    calculated_at = models.DateTimeField(auto_now_add=True, help_text="Timestamp when the calculation was performed")
+
+    def __str__(self):
+        return f"Commission and GST for {self.product.name} - OrderItem {self.order_item.id}"
+
+    def save(self, *args, **kwargs):
+        """
+        Override save method to dynamically calculate commission, GST, platform charges, and vendor earnings.
+        """
+        # Fetch the product price
+        product_price = self.order_item.product_variant.offer_price
+
+        # Call the utility function to perform calculations
+        calculations = calculate_commission_and_gst(product_price)
+
+        # Populate fields with calculated values
+        self.product_price = product_price
+        self.commission_rate = calculations["commission_rate"]
+        self.commission_amount = calculations["commission_amount"]
+        self.gst_on_commission = calculations["gst_on_commission"]
+        self.platform_charges = calculations["platform_charges"]
+        self.total_deduction = calculations["total_deduction"]
+        self.vendor_earnings = calculations["vendor_earnings"]
+
+        super().save(*args, **kwargs)  # Save the instance
+
+# File: commission_and_calculations\serializers.py
+from rest_framework import serializers
+from .models import PriceRangeCommission
+
+# ------------------------------------------
+# Serializer for PriceRangeCommission Model
+# Handles serialization and deserialization of the PriceRangeCommission model
+# Used for API interactions (List, Create, Retrieve, Update, Delete)
+# ------------------------------------------
+class PriceRangeCommissionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PriceRangeCommission
+        # ------------------------------------------
+        # Fields to Include:
+        # - id: Auto-generated primary key for the price range
+        # - min_price: Minimum price of the range
+        # - max_price: Maximum price of the range (nullable for open-ended ranges)
+        # - commission_rate: Commission percentage for the range
+        # - platform_charges: Fixed platform charges for the range
+        # ------------------------------------------
+        fields = ['id', 'min_price', 'max_price', 'commission_rate', 'platform_charges']
+
+
+# File: commission_and_calculations\views.py
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework.permissions import IsAuthenticated
+from .models import PriceRangeCommission
+from .serializers import PriceRangeCommissionSerializer
+
+# ------------------------------------------
+# List and Create View for PriceRangeCommission
+# Allows authenticated users to list all price ranges or create a new price range
+# ------------------------------------------
+class PriceRangeCommissionListCreateView(ListCreateAPIView):
+    queryset = PriceRangeCommission.objects.all()
+    serializer_class = PriceRangeCommissionSerializer
+    permission_classes = [IsAuthenticated]
+
+# ------------------------------------------
+# Retrieve, Update, and Delete View for PriceRangeCommission
+# Allows authenticated users to manage a specific price range
+# ------------------------------------------
+class PriceRangeCommissionDetailView(RetrieveUpdateDestroyAPIView):
+    queryset = PriceRangeCommission.objects.all()
+    serializer_class = PriceRangeCommissionSerializer
+    permission_classes = [IsAuthenticated]
+
+
+# File: commission_and_calculations\urls.py
+from django.urls import path
+from .views import PriceRangeCommissionListCreateView, PriceRangeCommissionDetailView
+
+urlpatterns = [
+    path('price-ranges/', PriceRangeCommissionListCreateView.as_view(), name='price-range-list-create'),
+    path('price-ranges/<int:pk>/', PriceRangeCommissionDetailView.as_view(), name='price-range-detail'),
+]
+
+
+##################################################
+
+# App: customer
+# File: customer\models.py
+from django.db import models
+from cart_orders.models import *
+from products.models import *
+from authusers.models import *
+
+# Create your models here.
+
+from django.core.validators import MinValueValidator, MaxValueValidator
+
+def review_media_upload_path(instance, filename):
+    """
+    Define the upload path for media files dynamically.
+    """
+    directory = f"reviews/{instance.review.id}/media/"
+    return os.path.join(directory, filename)
+
+
+class Review(models.Model):
+    customer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="reviews"
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="reviews"
+    )
+    review_text = models.TextField(blank=True, null=True)
+    rating = models.FloatField(
+        validators=[MinValueValidator(0), MaxValueValidator(5)],
+        help_text="Rating should be between 0 and 5."
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Review by {self.customer.email} for {self.product.name}"
+
+
+class ReviewMedia(models.Model):
+    review = models.ForeignKey(
+        Review,
+        on_delete=models.CASCADE,
+        related_name='media',
+        help_text="The review associated with this media"
+    )
+    media = models.FileField(
+        upload_to=review_media_upload_path,
+        help_text="Image or video file associated with the review"
+    )
+
+    def save(self, *args, **kwargs):
+        """
+        Override save to perform media processing if required.
+        """
+        super().save(*args, **kwargs)
+        if self.media and self.media.name.lower().endswith(('.png', '.jpg', '.jpeg')):
+            self._convert_image_to_jpeg()
+
+    def _convert_image_to_jpeg(self):
+        """
+        Convert image to JPEG format for consistency.
+        """
+        try:
+            input_path = self.media.path
+            output_path = f"{os.path.splitext(input_path)[0]}.jpeg"
+            if not os.path.exists(output_path):
+                with Image.open(input_path) as img:
+                    img = img.convert('RGB')
+                    img.save(output_path, 'JPEG', quality=85)
+                self.media.name = os.path.relpath(output_path, settings.MEDIA_ROOT)
+                super().save(update_fields=['media'])
+        except Exception as e:
+            print(f"Error converting image to JPEG: {e}")
+
+    def __str__(self):
+        return f"Media for Review {self.review.id}"
+
+
+
+
+
+
+# File: customer\serializers.py
+from rest_framework import serializers
+from .models import *
+from cart_orders.models import *
+from products.models import *
+
+class ReviewMediaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReviewMedia
+        fields = ['media']
+
+class ReviewSerializer(serializers.ModelSerializer):
+    media = ReviewMediaSerializer(many=True, required=False, write_only=True)
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
+
+    class Meta:
+        model = Review
+        fields = ['product', 'review_text', 'rating', 'media']
+
+    def validate_rating(self, value):
+        if not (0 <= value <= 5):
+            raise serializers.ValidationError("Rating must be between 0 and 5.")
+        return value
+
+    def create(self, validated_data):
+        media_data = validated_data.pop('media', [])
+        review = Review.objects.create(**validated_data)
+        for media_item in media_data:
+            ReviewMedia.objects.create(review=review, media=media_item['media'])
+        return review
+
+
+
+from rest_framework import serializers
+from admin_portal.models import Refund, RefundMedia
+from cart_orders.models import OrderItem
+from django.utils import timezone
+
+
+class RefundMediaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RefundMedia
+        fields = ['media']
+
+class RefundSerializer(serializers.ModelSerializer):
+    media = serializers.ListField(
+        child=serializers.FileField(),
+        write_only=True,
+        required=False,
+        help_text="List of media files (images/videos) for the refund"
+    )
+    order_id = serializers.IntegerField(write_only=True, help_text="ID of the order item to refund")
+    reason = serializers.CharField(max_length=500, required=True, help_text="Reason for the refund")
+
+    class Meta:
+        model = Refund
+        fields = ['order_id', 'reason', 'media']
+
+    def create(self, validated_data):
+        order_id = validated_data.pop('order_id')
+        media_files = validated_data.pop('media', [])
+        reason = validated_data['reason']
+
+        # Ensure the order item exists
+        try:
+            order_item = OrderItem.objects.get(pk=order_id)
+        except OrderItem.DoesNotExist:
+            raise serializers.ValidationError({"order_id": "Invalid order ID."})
+
+        # Create refund
+        refund = Refund.objects.create(
+            order_item=order_item,
+            reason=reason,
+            amount=order_item.price,  # Assuming `price` field exists in OrderItem
+            status='initiated',
+            refund_initiated_date=timezone.now()
+        )
+
+        # Save media files
+        for file in media_files:
+            RefundMedia.objects.create(refund=refund, media=file)
+
+        return refund
+
+
+class RefundMediaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RefundMedia
+        fields = ['id', 'media']
+
+class RefundDetailSerializer(serializers.ModelSerializer):
+    media = RefundMediaSerializer(source='refundmedia_set', many=True)  # Access related media
+
+    class Meta:
+        model = Refund
+        fields = [
+            'id', 'order_item', 'amount', 'reason', 'refund_status',
+            'refund_initiated_date', 'refund_processed_date',
+            'refund_rejected_date', 'refund_implemented_date', 'media',
+        ]
+        depth = 1
+
+
+
+# customers/serializers.py
+
+from rest_framework import serializers
+from products.models import FeaturedProduct
+
+class FeaturedProductDetailSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    vendor_name = serializers.CharField(source='vendor.shop_name', read_only=True)
+    product_thumbnail = serializers.ImageField(source='product.thumbnail', read_only=True)  # Fetch the thumbnail directly
+    price = serializers.SerializerMethodField()  # Fetch the price dynamically
+
+    class Meta:
+        model = FeaturedProduct
+        fields = ['id', 'product', 'product_name', 'vendor', 'vendor_name', 'product_thumbnail','price',  'added_at']
+
+    def get_product_image(self, obj):
+        # Return the first product image URL, if available
+        if obj.product.images.exists():
+            return obj.product.images.first().image.url
+        return None
+
+    def get_price(self, obj):
+        # Get the price of the first available variant
+        if obj.product.variants.exists():
+            first_variant = obj.product.variants.first()
+            return first_variant.offer_price  # Adjust based on your variant pricing model
+        return None  # Return None if no variants exist
+
+# File: customer\views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import AllowAny
+
+from django.shortcuts import get_object_or_404
+from django.db.models import Q
+from rest_framework.permissions import IsAuthenticated
+from cart_orders.models import OrderItem
+from vendors.serializers import OrderItemSerializer
+from .models import *
+from .serializers import *
+from products.models import *
+from vendors.models import *
+from products.serializers import *
+
+
+class AllProductsView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        """Fetch all products with pagination."""
+        products = Product.objects.all()
+        serializer = ProductSerializer(products, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ProductDetailView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        """Fetch product details by product ID."""
+        product = get_object_or_404(Product, pk=pk)
+        serializer = ProductSerializer(product)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class AllCategoriesView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        """Fetch all categories."""
+        categories = Category.objects.all()
+        serializer = CategorySerializer(categories, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+
+class AllAttributesView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        """Fetch all attributes."""
+        attributes = Attribute.objects.all()
+        serializer = AttributeSerializer(attributes, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class AttributeDetailView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        """Fetch details of a specific attribute."""
+        attribute = get_object_or_404(Attribute, pk=pk)
+        serializer = AttributeSerializer(attribute)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class AllAttributeValuesView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        """Fetch all attribute values."""
+        attribute_values = AttributeValue.objects.all()
+        serializer = AttributeValueSerializer(attribute_values, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class AttributeValueDetailView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        """Fetch details of a specific attribute value."""
+        attribute_value = get_object_or_404(AttributeValue, pk=pk)
+        serializer = AttributeValueSerializer(attribute_value)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+
+
+from products.models import ProductVariant
+from products.serializers import ProductVariantSerializer
+
+class ProductVariantsView(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, product_id):
+        """Fetch all variants for a specific product."""
+        product = get_object_or_404(Product, id=product_id)
+        variants = ProductVariant.objects.filter(product=product)
+        serializer = ProductVariantSerializer(variants, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+
+class ProductSearchView(APIView):
+    permission_classes = [AllowAny]
+    def get(self, request):
+        search_query = request.query_params.get('search', '').strip()
+        if not search_query:
+            return Response({"detail": "Search query is required."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Initial search by slug
+        search_terms = search_query.split()
+        query = Q()
+        for term in search_terms:
+            query |= Q(slug__icontains=term)
+        products = Product.objects.filter(query).distinct()
+
+        # Filter by price range
+        min_price = request.query_params.get('min_price')
+        max_price = request.query_params.get('max_price')
+        if min_price or max_price:
+            variants_query = Q()
+            if min_price:
+                variants_query &= Q(variants__offer_price__gte=float(min_price))
+            if max_price:
+                variants_query &= Q(variants__offer_price__lte=float(max_price))
+            products = products.filter(variants_query)
+
+        # Filter by attribute values
+        attribute_values = request.query_params.getlist('attribute_values')  # Example: ['1', '2', '3']
+        if attribute_values:
+            products = products.filter(variants__attributes__id__in=attribute_values).distinct()
+
+        # Serialize and return filtered results
+        serializer = ProductSerializer(products, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+
+
+
+# Customer paid orders
+
+class PaidOrderItemsView(APIView):
+    permission_classes = [IsAuthenticated]  # Ensure only authenticated users can access this endpoint
+
+    def get(self, request):
+        # Get the currently authenticated user
+        user = request.user
+
+        # Filter OrderItems with payment_status "paid" and Orders linked to the user
+        paid_items = OrderItem.objects.filter(
+            payment_status="paid",
+            order__customer=user
+        )
+
+        # Serialize the data
+        serializer = OrderItemSerializer(paid_items, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+
+
+# Product review
+
+class ReviewAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        # Ensure the user is a customer
+        if request.user.user_type != 'customer':
+            return Response(
+                {"detail": "Only customers can create reviews."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        serializer = ReviewSerializer(data=request.data)
+        if serializer.is_valid():
+            # Set the customer field to the authenticated user
+            serializer.save(customer=request.user)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def get(self, request, *args, **kwargs):
+        product_id = request.query_params.get("product")
+        if not product_id:
+            return Response(
+                {"detail": "Product ID is required as a query parameter."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        reviews = Review.objects.filter(product_id=product_id)
+        serializer = ReviewSerializer(reviews, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def delete(self, request, *args, **kwargs):
+        review_id = kwargs.get("review_id")
+        try:
+            review = Review.objects.get(id=review_id, customer=request.user)
+        except Review.DoesNotExist:
+            return Response(
+                {"detail": "Review not found or you are not authorized to delete it."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        review.delete()
+        return Response({"detail": "Review deleted successfully."}, status=status.HTTP_200_OK)
+
+
+class RefundInitiateView(APIView):
+    """
+    Endpoint to initiate a refund for a given order item.
+
+
+    """
+
+    permission_classes = [AllowAny]
+    def post(self, request, *args, **kwargs):
+        serializer = RefundSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(
+                {"message": "Refund initiated successfully."},
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+class RefundDetailView(APIView):
+    def get(self, request, refund_id):
+        try:
+            refund = Refund.objects.get(id=refund_id)
+        except Refund.DoesNotExist:
+            return Response({"error": "Refund not found"}, status=status.HTTP_404_NOT_FOUND)
+        
+        serializer = RefundDetailSerializer(refund)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+
+
+class ProductsByShopNameView(APIView):
+    permission_classes = [AllowAny]
+    def get(self, request, shop_name):
+        try:
+            # Get vendor with the given shop name
+            vendor = VendorDetails.objects.get(shop_name=shop_name)
+            # Filter products for this vendor
+            products = Product.objects.filter(vendor=vendor)
+            serializer = ProductSerializer(products, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except VendorDetails.DoesNotExist:
+            return Response({"error": "Shop not found."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+
+# customers/views.py
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from products.models import FeaturedProduct
+from .serializers import FeaturedProductDetailSerializer
+
+class FeaturedProductListView(APIView):
+    permission_classes = []  # Open to all users (no authentication required)
+
+    def get(self, request):
+        # Fetch all featured products
+        featured_products = FeaturedProduct.objects.select_related('product', 'vendor').all()
+        serializer = FeaturedProductDetailSerializer(featured_products, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import AllowAny
+from banners.models import Banner, ScrollableBanner
+from banners.serializers import BannerSerializer, ScrollableBannerSerializer
+
+
+class BannersView(APIView):
+    """
+    View to fetch all banners (bottom and scrollable).
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        # Fetch active banners
+        bottom_banners = Banner.objects.filter(is_active=True).order_by('-priority', 'created_at')
+        scrollable_banners = ScrollableBanner.objects.filter(is_active=True).order_by('-priority', 'created_at')
+
+        # Serialize data
+        bottom_banners_serializer = BannerSerializer(bottom_banners, many=True)
+        scrollable_banners_serializer = ScrollableBannerSerializer(scrollable_banners, many=True)
+
+        return Response({
+            "bottom_banners": bottom_banners_serializer.data,
+            "scrollable_banners": scrollable_banners_serializer.data
+        })
+
+
+# File: customer\urls.py
+from django.urls import path
+from .views import *
+
+urlpatterns = [
+    path('products/', AllProductsView.as_view(), name='all-products'),
+    path('products/<int:pk>/', ProductDetailView.as_view(), name='product-detail'),
+    path('categories/', AllCategoriesView.as_view(), name='all-categories'),
+    # Attribute Endpoints
+    path('attributes/', AllAttributesView.as_view(), name='all-attributes'),
+    path('attributes/<int:pk>/', AttributeDetailView.as_view(), name='attribute-detail'),
+    path('products/<int:product_id>/variants/', ProductVariantsView.as_view(), name='product-variants'),
+
+    # Attribute Value Endpoints
+    path('attribute-values/', AllAttributeValuesView.as_view(), name='all-attribute-values'),
+    path('attribute-values/<int:pk>/', AttributeValueDetailView.as_view(), name='attribute-value-detail'),
+
+    # Product search
+    path('products/search/', ProductSearchView.as_view(), name='product-search'),
+
+    # paid orders
+    path('order-items/paid/', PaidOrderItemsView.as_view(), name='paid-order-items'),
+
+
+    # reviews
+    path('reviews/', ReviewAPIView.as_view(), name='review-create-get'),
+    path('reviews/<int:review_id>/', ReviewAPIView.as_view(), name='review-delete'),
+    
+    # refund
+    path('refund/initiate/', RefundInitiateView.as_view(), name='refund-initiate'),
+    path('refunds/<int:refund_id>/', RefundDetailView.as_view(), name='refund-detail'),
+
+    #product 
+    path('products/shop/<str:shop_name>/', ProductsByShopNameView.as_view(), name='products-by-shop-name'),
+    path('featured-products/', FeaturedProductListView.as_view(), name='featured-products'),
+
+    path('banners/', BannersView.as_view(), name='banners'),
+]
+
+
+##################################################
+
+# App: ecommerce_platform
+# File: ecommerce_platform\urls.py
+from django.contrib import admin
+from django.urls import path, include
+from django.conf import settings
+from django.conf.urls.static import static
+
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('auth/', include('authusers.urls')),  
+    path('vendor/', include('vendors.urls')),
+    path('products/', include('products.urls')),
+    path('banners/', include('banners.urls')),
+    path('customers/', include('customer.urls')),
+    path('cartorders/', include('cart_orders.urls')),
+    path('admin_portal/', include('admin_portal.urls')),
+]
+
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+##################################################
+
+# App: products
+# File: products\models.py
+from django.db import models
+from django.contrib.auth import get_user_model
+from vendors.models import VendorDetails
+from django.utils.text import slugify
+from PIL import Image
+import os
+from django.conf import settings
+
+User = get_user_model()
+
+# ================================
+# Category Model
+# ================================
+from django.db import models
+from django.utils.text import slugify
+
+class Category(models.Model):
+    name = models.CharField(max_length=100)
+    slug = models.SlugField(max_length=150, unique=True, blank=True)
+    parent = models.ForeignKey(
+        'self', on_delete=models.CASCADE, null=True, blank=True, related_name='subcategories'
+    )
+    icon = models.ImageField(upload_to='category_icons/', blank=True, null=True, help_text="Icon image for the category")
+
+    class Meta:
+        verbose_name_plural = 'Categories'
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.name} ({self.parent.name if self.parent else 'Root'})"
+
+    def get_leaf_categories(self):
+        # Recursively fetch all leaf categories
+        if not self.subcategories.exists():
+            return [self]
+        leaves = []
+        for subcategory in self.subcategories.all():
+            leaves.extend(subcategory.get_leaf_categories())
+        return leaves
+
+    def get_all_subcategories(self):
+        """
+        Recursively fetch all subcategories, including nested ones.
+        """
+        subcategories = set(self.subcategories.all())
+        for subcategory in self.subcategories.all():
+            subcategories.update(subcategory.get_all_subcategories())
+        return subcategories
+
+# ================================
+# Attribute and Attribute Value Models
+# ================================
+class Attribute(models.Model):
+    name = models.CharField(max_length=100)
+    slug = models.SlugField(max_length=150, unique=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+class AttributeValue(models.Model):
+    attribute = models.ForeignKey(Attribute, on_delete=models.CASCADE, related_name='values')
+    value = models.CharField(max_length=100)
+    slug = models.SlugField(max_length=150, unique=True, blank=True)
+
+    class Meta:
+        unique_together = ('attribute', 'value')
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.value)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.attribute.name}: {self.value}"
+
+# ================================
+# Product Model
+# ================================
+from django.db import models
+from django.core.exceptions import ValidationError
+from django.utils.text import slugify
+
+class Product(models.Model):
+    vendor = models.ForeignKey(VendorDetails, on_delete=models.CASCADE, related_name='products')
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=250, unique=True, blank=True)
+    description = models.TextField(blank=True, null=True, help_text="Detailed product description")
+    category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, related_name='products')
+    thumbnail = models.ImageField(upload_to='product_thumbnails/')
+    stock = models.PositiveIntegerField(default= 0)
+    is_active = models.BooleanField(default=True)
+    is_returnable = models.BooleanField(default=False, help_text="Can this product be returned?")
+    max_return_days = models.PositiveIntegerField(blank=True, null=True, help_text="Maximum return days (if returnable)")
+    is_cancelable = models.BooleanField(default=True, help_text="Can this product be canceled?")
+    cancellation_stage = models.CharField(
+        max_length=50,
+        choices=[
+            ('before_packing', 'Before Packing'),
+            ('before_shipping', 'Before Shipping'),
+            ('before_delivery', 'Before Delivery'),
+        ],
+        blank=True,
+        null=True,
+        help_text="Stage at which cancellation is allowed"
+    )
+    is_cod_allowed = models.BooleanField(default=True, help_text="Is cash on delivery allowed for this product?")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def clean(self):
+        # Validate returnable logic
+        if self.is_returnable and not self.max_return_days:
+            raise ValidationError("Max return days must be specified if the product is returnable.")
+        
+        # Validate cancelable logic
+        if self.is_cancelable and not self.cancellation_stage:
+            raise ValidationError("Cancellation stage must be specified if the product is cancelable.")
+
+    def save(self, *args, **kwargs):
+        # Call clean method for validation before saving
+        self.clean()
+        if not self.slug:
+            self.slug = slugify(f"{self.vendor.id}-{self.name}")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.name
+
+# ================================
+# Product Variant Modell
+# ================================
+from django.db import models
+from django.utils.text import slugify
+from PIL import Image
+import os
+from django.conf import settings
+
+import random
+import string
+from django.utils.text import slugify
+
+class ProductVariant(models.Model):
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
+    attributes = models.ManyToManyField(AttributeValue, related_name='variants')
+    base_price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    offer_price = models.DecimalField(max_digits=10, decimal_places=2)
+    stock = models.PositiveIntegerField()
+    sku = models.CharField(max_length=14, unique=True, blank=True, help_text="Unique SKU for the product variant")
+
+    @property
+    def discount_percentage(self):
+        if self.base_price > 0:
+            return ((self.base_price - self.offer_price) / self.base_price) * 100
+        return 0
+
+    def save(self, *args, **kwargs):
+        is_new = self._state.adding  # Check if the instance is being created
+        super().save(*args, **kwargs)  # Save the instance to generate primary key
+
+        if is_new and not self.sku:
+            # Generate SKU in the format XXX-XXX-XXXX
+            random_chars = ''.join(random.choices(string.ascii_uppercase, k=3))  # First 3 letters
+            random_middle = ''.join(random.choices(string.ascii_uppercase + string.digits, k=3))  # Next 3
+            random_digits = ''.join(random.choices(string.digits, k=4))  # Last 4 digits
+            self.sku = f"{random_chars}-{random_middle}-{random_digits}"
+            super().save(update_fields=['sku'])  # Update SKU field after creation
+
+    def __str__(self):
+        if not self.pk:
+            return "Unsaved ProductVariant"
+        attributes = ", ".join([str(value) for value in self.attributes.all()])
+        return f"{self.product.name} ({attributes})"
+
+
+class VariantImage(models.Model):
+    product_variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name='images')
+    image = models.ImageField(upload_to='variant_images/')
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        self._convert_image_to_jpeg()
+
+    def _convert_image_to_jpeg(self):
+        if self.image:
+            try:
+                input_path = self.image.path
+                output_path = f"{os.path.splitext(input_path)[0]}.jpeg"
+                if not os.path.exists(output_path):
+                    with Image.open(input_path) as img:
+                        img = img.convert('RGB')
+                        img.save(output_path, 'JPEG', quality=85)
+                    self.image.name = os.path.relpath(output_path, settings.MEDIA_ROOT)
+                    super().save(update_fields=['image'])
+            except Exception as e:
+                print(f"Error converting image to JPEG: {e}")
+
+    def __str__(self):
+        return f"Image for Variant {self.product_variant.sku}"
+
+
+
+
+
+# ================================
+# Product Image Model
+# ================================
+class ProductImage(models.Model):
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='images')
+    image = models.ImageField(upload_to='product_images/')
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        self._convert_image_to_jpeg()
+
+    def _convert_image_to_jpeg(self):
+        if self.image:
+            try:
+                input_path = self.image.path
+                output_path = f"{os.path.splitext(input_path)[0]}.jpeg"
+                if not os.path.exists(output_path):
+                    with Image.open(input_path) as img:
+                        img = img.convert('RGB')
+                        img.save(output_path, 'JPEG', quality=85)
+                    self.image.name = os.path.relpath(output_path, settings.MEDIA_ROOT)
+                    super().save(update_fields=['image'])
+            except Exception as e:
+                print(f"Error converting image to JPEG: {e}")
+
+    def __str__(self):
+        return f"Image for {self.product.name}"
+
+# App: products/models.py
+
+from django.db import models
+from django.core.exceptions import ValidationError
+from vendors.models import VendorDetails
+from .models import Product
+
+class FeaturedProduct(models.Model):
+    vendor = models.ForeignKey(
+        VendorDetails,
+        on_delete=models.CASCADE,
+        related_name='featured_products',
+        help_text="Vendor owning the featured product"
+    )
+    product = models.OneToOneField(
+        Product,
+        on_delete=models.CASCADE,
+        related_name='featured_status',
+        help_text="The featured product"
+    )
+    added_at = models.DateTimeField(auto_now_add=True, help_text="Timestamp when the product was marked as featured")
+
+    def save(self, *args, **kwargs):
+        # Enforce 10-product limit per vendor
+        if self.vendor.featured_products.count() >= 10:
+            raise ValidationError("A vendor can only have 10 featured products.")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"Featured Product: {self.product.name} by {self.vendor.shop_name}"
+
+
+# File: products\serializers.py
+from rest_framework import serializers
+from .models import Category, Attribute, AttributeValue, Product, ProductVariant, ProductImage
+from rest_framework.exceptions import ValidationError
+
+# ================================
+# Category Serializer
+# ================================
+class CategorySerializer(serializers.ModelSerializer):
+    subcategories = serializers.SerializerMethodField()
+    icon = serializers.ImageField(read_only=True)
+
+    class Meta:
+        model = Category
+        fields = ['id', 'name', 'slug', 'parent', 'subcategories', 'icon']
+
+    def get_subcategories(self, obj):
+        return CategorySerializer(obj.subcategories.all(), many=True).data
+
+# ================================
+# Attribute and Attribute Value Serializers
+# ================================
+class AttributeValueSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AttributeValue
+        fields = ['id', 'attribute', 'value', 'slug']
+
+class AttributeSerializer(serializers.ModelSerializer):
+    values = AttributeValueSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Attribute
+        fields = ['id', 'name', 'slug', 'values']
+
+# ================================
+# Product Image Serializer
+# ================================
+class ProductImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductImage
+        fields = ['id', 'product', 'image']
+
+# ================================
+# Product Variant Serializer
+# ================================
+
+from .models import VariantImage
+
+class VariantImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VariantImage
+        fields = ['id', 'product_variant', 'image']
+
+
+class ProductVariantSerializer(serializers.ModelSerializer):
+    # Allow writable attribute linking
+    attributes = serializers.PrimaryKeyRelatedField(queryset=AttributeValue.objects.all(), many=True)
+    discount_percentage = serializers.ReadOnlyField()
+    images = VariantImageSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ProductVariant
+        fields = [
+            'id', 'product', 'attributes', 'base_price', 'offer_price',
+            'discount_percentage', 'stock', 'sku', 'images'
+        ]
+
+    def create(self, validated_data):
+        attributes = validated_data.pop('attributes', [])
+        product = validated_data.get('product')
+
+        # Check if a variant with the same attributes already exists
+        existing_variants = ProductVariant.objects.filter(product=product)
+        for variant in existing_variants:
+            existing_attribute_ids = set(variant.attributes.values_list('id', flat=True))
+            new_attribute_ids = set([attr.id for attr in attributes])
+            if existing_attribute_ids == new_attribute_ids:
+                raise ValidationError("A product variant with the same attribute values already exists.")
+
+        # Create the product variant if it doesn't exist
+        product_variant = ProductVariant.objects.create(**validated_data)
+        product_variant.attributes.set(attributes)
+        product.stock += product_variant.stock
+        if product.is_cancelable and not product.cancellation_stage:
+            
+            product.cancellation_stage = "Default Stage"
+        product.save()  # Link ManyToMany field after creation
+        return product_variant
+
+    def update(self, instance, validated_data):
+        attributes = validated_data.pop('attributes', [])
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if attributes:
+            instance.attributes.set(attributes)  # Update ManyToMany field
+        return instance
+
+
+
+# ================================
+# Product Serializer
+# ================================
+from rest_framework import serializers
+from .models import Product
+from .serializers import ProductVariantSerializer, ProductImageSerializer
+
+class ProductSerializer(serializers.ModelSerializer):
+    variants = ProductVariantSerializer(many=True, read_only=True)
+    images = ProductImageSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Product
+        fields = [
+            'id', 'name', 'slug', 'description', 'category',
+            'thumbnail', 'is_returnable', 'max_return_days', 'is_cancelable', 'cancellation_stage', 'is_cod_allowed',
+            'created_at', 'updated_at', 'variants', 'images', 'stock',
+        ]
+
+    def validate(self, data):
+        # Validate is_returnable and max_return_days
+        if data.get('is_returnable') and not data.get('max_return_days'):
+            raise serializers.ValidationError({"max_return_days": "This field is required if the product is returnable."})
+
+        # Validate is_cancelable and cancellation_stage
+        if data.get('is_cancelable') and not data.get('cancellation_stage'):
+            raise serializers.ValidationError({"cancellation_stage": "This field is required if the product is cancelable."})
+        
+        return data
+
+
+
+
+# App: products/serializers.py
+
+from rest_framework import serializers
+from .models import FeaturedProduct
+
+class FeaturedProductSerializer(serializers.ModelSerializer):
+    store_name = serializers.CharField(source='vendor.shop_name', read_only=True)
+
+    class Meta:
+        model = FeaturedProduct
+        fields = ['id', 'product', 'added_at','store_name']
+        read_only_fields = ['vendor']  # Prevent vendor from being passed in the request
+
+
+from rest_framework import serializers
+from .models import Product
+
+class ProductFilterSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    store_name = serializers.CharField(source='vendor.shop_name', read_only=True)
+    price = serializers.SerializerMethodField()  # Dynamically get the price
+
+    class Meta:
+        model = Product
+        fields = ['id', 'store_name', 'name', 'category', 'category_name', 'thumbnail', 'price', 'stock']
+
+    def get_price(self, obj):
+        # Fetch the price from the first variant if available
+        if obj.variants.exists():
+            return obj.variants.first().offer_price  # Adjust as per your model field
+        return None  # Return None if no variants
+
+
+from rest_framework import serializers
+from .models import Product
+
+class NewArrivalsSerializer(serializers.ModelSerializer):
+    category_name = serializers.CharField(source='category.name', read_only=True)
+    price = serializers.SerializerMethodField()  # Fetch price dynamically from the first variant
+
+    class Meta:
+        model = Product
+        fields = [
+            'id',
+            'name',
+            'category',
+            'category_name',
+            'thumbnail',
+            'created_at',
+            'stock',
+            'price',  # Include price in the response
+        ]
+
+    def get_price(self, obj):
+        # Fetch the price from the first variant if available
+        if obj.variants.exists():
+            return obj.variants.first().offer_price  # Use offer_price field from the variant
+        return None  # Return None if no variants are available
+
+
+# File: products\views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from .models import Category, Attribute, AttributeValue, Product, ProductVariant, ProductImage
+from .serializers import (
+    CategorySerializer,
+    AttributeSerializer,
+    AttributeValueSerializer,
+    ProductSerializer,
+    ProductVariantSerializer,
+    ProductImageSerializer
+)
+
+# ================================
+# Category Views
+# ================================
+class CategoryListCreateView(ListCreateAPIView):
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+class CategoryDetailView(RetrieveUpdateDestroyAPIView):
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+# ================================
+# Leaf Category Views
+# ================================
+
+class LeafCategoriesByParentView(APIView):
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+    def get(self, request, parent_id):
+        try:
+            parent_category = Category.objects.get(id=parent_id)
+        except Category.DoesNotExist:
+            return Response({'error': 'Category not found.'}, status=404)
+
+        # Fetch all leaf categories under the selected category
+        leaf_categories = parent_category.get_leaf_categories()
+        serializer = CategorySerializer(leaf_categories, many=True)
+        return Response(serializer.data)
+
+# ================================
+# Attribute Views
+# ================================
+class AttributeListCreateView(ListCreateAPIView):
+    queryset = Attribute.objects.all()
+    serializer_class = AttributeSerializer
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+class AttributeDetailView(RetrieveUpdateDestroyAPIView):
+    queryset = Attribute.objects.all()
+    serializer_class = AttributeSerializer
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+class AttributeValueListCreateView(ListCreateAPIView):
+    queryset = AttributeValue.objects.all()
+    serializer_class = AttributeValueSerializer
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+class AttributeValueDetailView(RetrieveUpdateDestroyAPIView):
+    queryset = AttributeValue.objects.all()
+    serializer_class = AttributeValueSerializer
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+# ================================
+# Product Views
+# ================================
+class ProductListCreateView(ListCreateAPIView):
+    serializer_class = ProductSerializer
+
+    def get_queryset(self):
+        # Filter products by the vendor of the logged-in user
+        return Product.objects.filter(vendor=self.request.user.vendor_details)
+
+    def get_permissions(self):
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        # Save the product with the vendor set to the logged-in user's vendor details
+        serializer.save(vendor=self.request.user.vendor_details)
+
+
+class ProductDetailView(RetrieveUpdateDestroyAPIView):
+    queryset = Product.objects.all()
+    serializer_class = ProductSerializer
+
+    def get_permissions(self):
+        return [IsAuthenticated()]
+
+# ================================
+# Product Variant Views
+# ================================
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework.permissions import IsAuthenticated
+from .models import ProductVariant, VariantImage
+from .serializers import ProductVariantSerializer
+from rest_framework import serializers
+
+class ProductVariantListCreateView(ListCreateAPIView):
+    queryset = ProductVariant.objects.all()
+    serializer_class = ProductVariantSerializer
+
+    def get_permissions(self):
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        product_variant = serializer.save()
+        images = self.request.FILES.getlist('images')
+        for image in images:
+            VariantImage.objects.create(product_variant=product_variant, image=image)
+
+    def create(self, request, *args, **kwargs):
+        try:
+            return super().create(request, *args, **kwargs)
+        except serializers.ValidationError as e:
+            return Response({"error": e.detail}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ProductVariantDetailView(RetrieveUpdateDestroyAPIView):
+    queryset = ProductVariant.objects.all()
+    serializer_class = ProductVariantSerializer
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+    def perform_update(self, serializer):
+        # Update the product variant
+        product_variant = serializer.save()
+
+        # Handle nested image updates
+        images = self.request.FILES.getlist('images')  # Expect multiple files with key 'images'
+        if images:
+            # Clear existing images
+            VariantImage.objects.filter(product_variant=product_variant).delete()
+            # Add new images
+            for image in images:
+                VariantImage.objects.create(product_variant=product_variant, image=image)
+
+
+
+# ================================
+# Product Image Views
+# ================================
+class ProductImageListCreateView(ListCreateAPIView):
+    queryset = ProductImage.objects.all()
+    serializer_class = ProductImageSerializer
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+class ProductImageDetailView(RetrieveUpdateDestroyAPIView):
+    queryset = ProductImage.objects.all()
+    serializer_class = ProductImageSerializer
+
+    def get_permissions(self):
+        if self.request.method == 'GET':
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+
+from rest_framework.generics import RetrieveDestroyAPIView
+from .models import VariantImage
+from .serializers import VariantImageSerializer
+
+class VariantImageDetailView(RetrieveDestroyAPIView):
+    """
+    Allows retrieving and deleting a specific VariantImage by its primary key.
+    """
+    queryset = VariantImage.objects.all()
+    serializer_class = VariantImageSerializer
+
+
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from .models import FeaturedProduct, Product
+from .serializers import FeaturedProductSerializer
+from vendors.models import VendorDetails
+from django.core.exceptions import ValidationError
+
+class FeaturedProductListCreateView(APIView):
+    def get(self, request):
+        # Fetch the vendor for the logged-in user
+        try:
+            vendor = VendorDetails.objects.get(user=request.user)
+        except VendorDetails.DoesNotExist:
+            return Response({"detail": "Vendor not found."}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get all featured products for the logged-in vendor
+        featured_products = FeaturedProduct.objects.filter(vendor=vendor)
+        serializer = FeaturedProductSerializer(featured_products, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        # Fetch the vendor for the logged-in user
+        try:
+            vendor = VendorDetails.objects.get(user=request.user)
+        except VendorDetails.DoesNotExist:
+            return Response({"detail": "Vendor not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Validate the product belongs to the logged-in vendor
+        product_id = request.data.get('product')
+        try:
+            product = Product.objects.get(id=product_id, vendor=vendor)
+        except Product.DoesNotExist:
+            return Response({"detail": "This product does not belong to you."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate and save the featured product
+        if vendor.featured_products.count() >= 10:
+            return Response({"detail": "You can only have up to 10 featured products."}, status=status.HTTP_400_BAD_REQUEST)
+
+        featured_product = FeaturedProduct(vendor=vendor, product=product)
+        try:
+            featured_product.save()
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = FeaturedProductSerializer(featured_product)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+from rest_framework.generics import ListAPIView
+from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
+from django.db.models import Q
+from .models import Product, Category
+from .serializers import ProductFilterSerializer
+
+
+class ProductPagination(PageNumberPagination):
+    """
+    Custom pagination class for product filtering.
+    """
+    page_size = 6  # Number of products per page
+    page_size_query_param = 'page_size'  # Allow users to set page size via query
+    max_page_size = 100  # Maximum products per page
+
+
+class ProductFilterByCategoryView(ListAPIView):
+    """
+    API view to filter products by category, including subcategories.
+    """
+    serializer_class = ProductFilterSerializer
+    pagination_class = ProductPagination
+    permission_classes = []  # Open to all users (no authentication required)
+
+    def get_queryset(self):
+        # Get the category ID from the query parameters
+        category_id = self.request.query_params.get('category_id')
+        if not category_id:
+            return Product.objects.none()  # Return an empty queryset if no category ID
+
+        try:
+            # Get the selected category
+            category = Category.objects.get(id=category_id)
+
+            # Fetch all subcategories, including the selected category
+            subcategories = Category.objects.filter(Q(id=category.id) | Q(parent=category))
+
+            # Return filtered products for the subcategories
+            return Product.objects.filter(category__in=subcategories, is_active=True).select_related('category')
+
+        except Category.DoesNotExist:
+            return Product.objects.none()  # Return an empty queryset if the category is not found
+
+
+
+
+from rest_framework.generics import ListAPIView
+from rest_framework.pagination import PageNumberPagination
+from .models import Product
+from .serializers import NewArrivalsSerializer
+from datetime import timedelta
+from django.utils.timezone import now
+
+class NewArrivalsPagination(PageNumberPagination):
+    page_size = 28  # Default number of products per page
+    page_size_query_param = 'page_size'  # Allow frontend to set the page size
+    max_page_size = 90 # Limit the maximum number of products per page
+
+class NewArrivalsView(ListAPIView):
+    serializer_class = NewArrivalsSerializer
+    pagination_class = NewArrivalsPagination
+
+
+    permission_classes = []
+    def get_queryset(self):
+        # Define the time window for "New Arrivals" (e.g., last 30 days)
+        new_arrivals_window = now() - timedelta(days=30)
+
+        # Get products within the new arrivals window
+        new_products = Product.objects.filter(created_at__gte=new_arrivals_window).order_by('-created_at')
+
+        # If fewer than the desired count, add older products to fill the gap
+        if new_products.count() < self.pagination_class.page_size:
+            fallback_products = Product.objects.exclude(id__in=new_products).order_by('-created_at')[:self.pagination_class.page_size - new_products.count()]
+            return new_products | fallback_products  # Combine querysets
+
+        return new_products
+
+
+
+from rest_framework.generics import ListAPIView
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import AllowAny
+from django.shortcuts import get_object_or_404
+from rest_framework.response import Response
+from products.models import Product, Category
+from products.serializers import ProductSerializer
+
+class ProductPagination(PageNumberPagination):
+    page_size = 8  # Limit to 8 products per page
+    page_size_query_param = 'page_size'  # Allow clients to override page size
+    max_page_size = 100  # Set a maximum limit for page size
+
+class ProductListView(ListAPIView):
+    """
+    View to retrieve paginated products, including those from nested subcategories of a root category.
+    """
+    permission_classes = [AllowAny]  # Allow access to all users
+    serializer_class = ProductSerializer
+    pagination_class = ProductPagination
+
+    def get_queryset(self):
+        # Get the root category ID from the request (e.g., query parameter or URL)
+        root_category_id = self.request.query_params.get('category_id')
+        if not root_category_id:
+            return Product.objects.none()  # Return an empty queryset if no category ID is provided
+
+        # Fetch the root category
+        root_category = get_object_or_404(Category, id=root_category_id)
+
+        # Get all subcategories, including nested ones
+        all_subcategories = root_category.get_all_subcategories()
+        all_category_ids = [category.id for category in all_subcategories]
+        all_category_ids.append(root_category.id)  # Include the root category itself
+
+        # Query products for these categories
+        return Product.objects.filter(category_id__in=all_category_ids, is_active=True)
+
+
+# File: products\urls.py
+from django.urls import path
+from .views import (
+    CategoryListCreateView,
+    CategoryDetailView,
+    AttributeListCreateView, 
+    AttributeDetailView,
+    AttributeValueListCreateView, 
+    AttributeValueDetailView,
+    ProductListCreateView, 
+    ProductDetailView,
+    ProductVariantListCreateView, 
+    ProductVariantDetailView,
+    ProductImageListCreateView, 
+    ProductImageDetailView,
+    LeafCategoriesByParentView,
+    VariantImageDetailView,
+    FeaturedProductListCreateView,
+    ProductFilterByCategoryView,
+    NewArrivalsView,
+    ProductListView,
+
+)
+
+urlpatterns = [
+    # Category URLs
+    path('categories/', CategoryListCreateView.as_view(), name='category-list-create'),
+    path('categories/<int:pk>/', CategoryDetailView.as_view(), name='category-detail'),
+    path('categories/<int:parent_id>/leaf/', LeafCategoriesByParentView.as_view(), name='leaf-categories'),
+
+    # Attribute URLs
+    path('attributes/', AttributeListCreateView.as_view(), name='attribute-list-create'),
+    path('attributes/<int:pk>/', AttributeDetailView.as_view(), name='attribute-detail'),
+    path('attribute-values/', AttributeValueListCreateView.as_view(), name='attribute-value-list-create'),
+    path('attribute-values/<int:pk>/', AttributeValueDetailView.as_view(), name='attribute-value-detail'),
+
+    # Product URLs
+    path('products/', ProductListCreateView.as_view(), name='product-list-create'),
+    path('products/<int:pk>/', ProductDetailView.as_view(), name='product-detail'),
+
+    # Product Variant URLs
+    path('variants/', ProductVariantListCreateView.as_view(), name='variant-list-create'),
+    path('variants/<int:pk>/', ProductVariantDetailView.as_view(), name='variant-detail'),
+    path('variants/images/<int:pk>/', VariantImageDetailView.as_view(), name='variant-image-detail'),
+
+    # Product Image URLs
+    path('images/', ProductImageListCreateView.as_view(), name='image-list-create'),
+    path('images/<int:pk>/', ProductImageDetailView.as_view(), name='image-detail'),
+
+    path('featured-products/', FeaturedProductListCreateView.as_view(), name='featured-products'),
+
+    path('products/filter/', ProductFilterByCategoryView.as_view(), name='product-filter'),
+    
+    path('products/new-arrivals/', NewArrivalsView.as_view(), name='new-arrivals'),
+
+    path('filter-category-products/', ProductListView.as_view(), name='filter-category-products'),
+
+    
+]
+
+
+# File: products\tasks.py
+from celery import shared_task
+from PIL import Image
+import os
+from django.conf import settings
+from django.core.cache import cache
+from .models import ProductImage, Category
+
+
+@shared_task
+def convert_image_to_jpeg(image_path):
+    """
+    Convert an image to JPEG format if not already in JPEG format.
+    """
+    try:
+        output_path = f"{os.path.splitext(image_path)[0]}.jpeg"
+        if not os.path.exists(output_path):  # Avoid overwriting existing files
+            with Image.open(image_path) as img:
+                img = img.convert('RGB')  # Ensure the image is in RGB mode
+                img.save(output_path, 'JPEG', quality=85)
+            return f"Converted {image_path} to {output_path}"
+        return f"Image {output_path} already exists."
+    except Exception as e:
+        return f"Error processing {image_path}: {e}"
+
+
+@shared_task
+def refresh_category_cache():
+    """
+    Refresh the cached category structure and associated products.
+    """
+    categories = Category.objects.all()
+    results = []
+
+    for category in categories:
+        # Cache key for products under this category
+        cache_key = f"category_products_{category.slug}"
+        products = category.products.all()  # Assuming related_name='products' in Category
+        product_data = [
+            {"id": product.id, "name": product.name, "price": product.base_price}
+            for product in products
+        ]
+        cache.set(cache_key, product_data, timeout=6 * 60 * 60)  # Cache for 6 hours
+        results.append(f"Cached products for category {category.slug}")
+
+    return results
+
+
+@shared_task
+def process_all_images():
+    """
+    Convert all ProductImage files to JPEG.
+    """
+    images = ProductImage.objects.all()
+    results = []
+
+    for image in images:
+        image_path = image.image.path
+        result = convert_image_to_jpeg(image_path)
+        results.append(result)
+
+    return results
+
+
+@shared_task
+def refresh_category_hierarchy_cache():
+    """
+    Cache the entire category hierarchy for optimized front-end loading.
+    """
+    category_data = list(
+        Category.objects.all().values("id", "name", "slug", "parent_id")
+    )
+    cache.set("category_hierarchy", category_data, timeout=6 * 60 * 60)  # Cache for 6 hours
+    return "Category hierarchy cached successfully."
+
+
+##################################################
+
+# App: vendors
+# File: vendors\models.py
+from django.db import models
+from django.contrib.auth import get_user_model
+from django.conf import settings
+from authusers.models import User
+from PIL import Image  # For image resizing
+import logging
+
+import os
+
+User = get_user_model()
+
+# Helper function for file upload path
+def upload_to(instance, filename):
+    return f"vendor_images/{instance.user.id}/{filename}"
+
+logger = logging.getLogger(__name__)  # Initialize the logger
+
+class VendorDetails(models.Model):
+    ID_PROOF_CHOICES = [
+        ('aadhar', 'Aadhar Card'),
+        ('dl', 'Driving License'),
+        ('pan', 'PAN Card'),
+    ]
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='vendor_details')
+    shop_name = models.CharField(max_length=255, blank=True, null=True)
+    shop_logo = models.ImageField(upload_to="vendor_images/", blank=True, null=True)
+    bio = models.TextField(max_length=500, blank=True, null=True)
+    video = models.FileField(upload_to='vendor_videos/', blank=True, null=True)
+    bank_account_number = models.CharField(max_length=20, blank=True, null=True)
+    bank_name = models.CharField(max_length=100, blank=True, null=True)
+    ifsc_code = models.CharField(max_length=20, blank=True, null=True)
+    id_proof_type = models.CharField(max_length=20, choices=ID_PROOF_CHOICES, blank=True, null=True)
+    id_proof_file = models.FileField(upload_to='vendor_id_proofs/', blank=True, null=True)
+    is_verified = models.BooleanField(default=False)
+    address = models.CharField(max_length=255, blank=True, null=True)
+    state = models.CharField(max_length=100, blank=True, null=True)
+    city = models.CharField(max_length=100, blank=True, null=True) 
+    pincode = models.CharField(max_length=6, blank=True, null=True) 
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        # Save the model first to ensure the file exists in the filesystem
+        super().save(*args, **kwargs)
+        # Convert image to JPEG if shop_logo exists
+        if self.shop_logo:
+            self._convert_image_to_jpeg()
+
+    def _convert_image_to_jpeg(self):
+        try:
+            input_path = self.shop_logo.path  # Path to the original file
+            logger.info(f"Converting image at path: {input_path}")
+            base = os.path.splitext(input_path)[0]  # Get base file path without extension
+            jpeg_path = f"{base}.jpeg"
+            logger.info(f"JPEG path: {jpeg_path}")
+
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(jpeg_path), exist_ok=True)
+
+            # Convert and save as JPEG
+            with Image.open(input_path) as image:
+                image = image.convert("RGB")  # Convert to RGB if not already
+                image.save(jpeg_path, format="JPEG", quality=85)
+                logger.info(f"Image converted and saved to JPEG at: {jpeg_path}")
+
+            # Update shop_logo path to JPEG without triggering save
+            self.shop_logo.name = os.path.relpath(jpeg_path, settings.MEDIA_ROOT)
+            super().save(update_fields=["shop_logo"])  # Save only the updated field
+            logger.info(f"shop_logo updated to: {self.shop_logo.name}")
+        except Exception as e:
+            logger.error(f"Error converting image to JPEG: {e}")
+
+
+
+    def __str__(self):
+        return f"Vendor Details for {self.user.email}"
+
+
+
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from .models import VendorDetails
+from .tasks import send_vendor_activation_email_task
+
+@receiver(post_save, sender=VendorDetails)
+def send_vendor_activation_email(sender, instance, created, **kwargs):
+    if instance.is_verified:  # Only send email if the account is verified
+        send_vendor_activation_email_task.delay(
+            user_email=instance.user.email,
+            user_first_name=instance.user.first_name,
+        )
+
+
+
+
+
+
+
+# File: vendors\serializers.py
+from rest_framework import serializers
+from .models import VendorDetails
+from django.core.exceptions import ValidationError
+from cart_orders.models import OrderItem
+from authusers.serializers import AddressSerializer
+
+class VendorDetailsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VendorDetails
+        fields = [
+            'shop_name',
+            'shop_logo',
+            'bio',
+            'video',
+            'city',
+            'state',
+            'address',
+            'pincode',
+            'bank_account_number',
+            'bank_name',
+            'ifsc_code',
+            'id_proof_type',
+            'id_proof_file',
+            'is_verified',
+        ]
+        read_only_fields = ['is_verified']
+
+    def validate_video(self, value):
+        """Validate the uploaded video for size and duration."""
+        if value.size > 50 * 1024 * 1024:  # 50MB limit
+            raise ValidationError("Video size cannot exceed 50MB.")
+        return value
+
+    def validate_bank_account_number(self, value):
+        """Ensure the bank account number is numeric."""
+        if not value.isdigit():
+            raise ValidationError("Bank account number must be numeric.")
+        return value
+
+    def validate(self, data):
+        """Custom validation to ensure all required fields are filled."""
+        required_fields = [
+            'shop_name',
+            'bio',
+            'bank_account_number',
+            'bank_name',
+            'ifsc_code',
+            'id_proof_type',
+            'city',
+            'state',
+            'address',
+            'pincode',
+        ]
+        for field in required_fields:
+            if not data.get(field):
+                raise ValidationError(f"{field} is required.")
+        return data
+
+
+
+class SimplifiedVendorSerializer(serializers.ModelSerializer):
+
+    class Meta:
+        model = VendorDetails
+        fields = ['id','shop_name', 'city', 'state', 'address', 'pincode']
+
+
+
+
+from products.serializers import ProductVariantSerializer
+
+class OrderItemSerializer(serializers.ModelSerializer):
+    delivery_address = serializers.SerializerMethodField()  # Add delivery address field
+    customer_details = serializers.SerializerMethodField()  # Add customer details field
+    variant_image = serializers.SerializerMethodField()  # Add this field
+    
+    class Meta:
+        model = OrderItem
+        fields = [
+            'id',
+            'customer_details',  
+            'order',
+            'product_variant',
+            'quantity',
+            'price',
+            'created_at',
+            'updated_at',
+            'payment_status',
+            'delivery_address', 
+            'variant_image',  # Include the variant image in the response
+ 
+        ]
+
+    def get_delivery_address(self, obj):
+        """
+        Retrieve the delivery address from the related order's DeliveryDetail.
+        """
+        if hasattr(obj.order, 'delivery_detail') and obj.order.delivery_detail:
+            return AddressSerializer(obj.order.delivery_detail.address).data
+        return None  # Return None if no delivery detail is associated
+
+    def get_customer_details(self, obj):
+        """
+        Retrieve customer details from the related order.
+        """
+        customer = obj.order.customer
+        return {
+            "name": f"{customer.first_name} {customer.last_name}".strip(),
+            "email": customer.email,
+            "phone_number": customer.phone_number,  # Assuming the User model includes phone_number
+        }
+
+    def get_variant_image(self, obj):
+        """
+        Fetch the first image for the product variant.
+        """
+        if obj.product_variant.images.exists():
+            return obj.product_variant.images.first().image.url  # Adjust field if necessary
+        return None
+
+
+
+class VendorDashboardSerializer(serializers.Serializer):
+    total_orders = serializers.IntegerField()
+    total_earnings_week = serializers.DecimalField(max_digits=10, decimal_places=2)
+    total_earnings_day = serializers.DecimalField(max_digits=10, decimal_places=2)
+
+
+from rest_framework import serializers
+from .models import VendorDetails
+
+class VendorShopSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VendorDetails
+        fields = ['id', 'shop_name', 'shop_logo']  # Include shop name and image
+
+
+# File: vendors\views.py
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework import status
+from .models import VendorDetails
+from .serializers import VendorDetailsSerializer
+from django.shortcuts import get_object_or_404
+from django.http import FileResponse, Http404
+import mimetypes
+import os
+from django.conf import settings
+from cart_orders.models import OrderItem
+from .serializers import OrderItemSerializer
+
+class VendorDetailsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Retrieve vendor details."""
+        vendor_details = get_object_or_404(VendorDetails, user=request.user)
+        serializer = VendorDetailsSerializer(vendor_details)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        """Create or update vendor details."""
+        vendor_details, created = VendorDetails.objects.get_or_create(user=request.user)
+        serializer = VendorDetailsSerializer(vendor_details, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def patch(self, request):
+        """Partially update vendor details."""
+        vendor_details = get_object_or_404(VendorDetails, user=request.user)
+        serializer = VendorDetailsSerializer(vendor_details, data=request.data, partial=True,)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+def serve_media(request, path):
+    """Serve media files."""
+    full_path = os.path.join(settings.MEDIA_ROOT, path)
+
+    # Restrict access to files outside MEDIA_ROOT
+    if not full_path.startswith(settings.MEDIA_ROOT):
+        raise Http404("File not found or access denied.")
+
+    if not os.path.exists(full_path):
+        raise Http404("The requested file does not exist.")
+
+    # Guess the MIME type based on the file extension
+    content_type, _ = mimetypes.guess_type(full_path)
+    if content_type is None:
+        content_type = "application/octet-stream"  # Fallback if type can't be guessed
+
+    # Serve the file securely
+    with open(full_path, 'rb') as file:
+        return FileResponse(file, content_type=content_type)
+
+
+class VendorPaidOrderItemsView(APIView):
+    """
+    Endpoint to get a list of order items with payment_status='paid' for the vendor.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Get the authenticated vendor from the request
+        user = request.user
+
+        # Ensure the user is a vendor
+        if user.user_type != 'vendor':
+            raise PermissionDenied("You do not have permission to access this resource.")
+        print(user.vendor_profile, "vendor profile")
+        # Fetch the order items with payment_status='paid' for this vendor
+        VendorDetails = user.vendor_details  # Assuming vendor_profile is linked to VendorDetails
+        print(VendorDetails, "vendor details")  
+        # Fetch the order items with payment_status='paid' for this vendor
+        paid_order_items = OrderItem.objects.filter(vendor=VendorDetails, payment_status='paid')
+
+        # Serialize the data
+        serializer = OrderItemSerializer(paid_order_items, many=True)
+
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+
+
+
+from datetime import date, timedelta
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from django.db.models import Sum, Count
+from cart_orders.models import OrderItem
+
+class VendorDashboardView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        vendor = request.user.vendor_details  # Ensure this matches your relationship
+
+        # Fetch OrderItems linked to the vendor
+        order_items = OrderItem.objects.filter(product_variant__product__vendor=vendor)
+
+        # Total Orders
+        total_orders = order_items.values('order').distinct().count()
+
+        # Earnings for the Week
+        week_start = date.today() - timedelta(days=7)
+        weekly_earnings = order_items.filter(
+            order__created_at__gte=week_start,
+            order__payment_status='paid'
+        ).aggregate(total=Sum('order__total_price'))['total'] or 0
+
+        # Earnings for the Day
+        daily_earnings = order_items.filter(
+            order__created_at__date=date.today(),
+            order__payment_status='paid'
+        ).aggregate(total=Sum('order__total_price'))['total'] or 0
+
+        data = {
+            "total_orders": total_orders,
+            "total_earnings_week": weekly_earnings,
+            "total_earnings_day": daily_earnings,
+        }
+        return Response(data)
+
+
+
+class VendorOrderStatusUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, order_item_id):
+        """
+        Retrieve the current status of the order item.
+        """
+        order_item = get_object_or_404(OrderItem, id=order_item_id)
+        return Response({
+            "order_item_id": order_item.id,
+            "product_name": order_item.product_variant.product.name,
+            "current_status": order_item.order_status,
+            "updated_at": order_item.updated_at,
+        }, status=status.HTTP_200_OK)
+
+    def patch(self, request, order_item_id):
+        """
+        Update the status of the order item.
+        """
+        order_item = get_object_or_404(OrderItem, id=order_item_id)
+        new_status = request.data.get("new_status")
+
+        if not new_status:
+            return Response({"error": "New status is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if order_item.update_status(new_status):
+            return Response({"message": f"Order item status updated to {new_status}."}, status=status.HTTP_200_OK)
+
+        return Response({"error": "Invalid status transition."}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+
+class OrderStatusOptionsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # Define the available order statuses
+        status_options = [
+            {"value": "ready_to_pick_up", "label": "Ready to Pick Up"},
+            {"value": "packed", "label": "Packed"},
+        ]
+        return Response(status_options)
+
+
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from .models import VendorDetails
+from .serializers import VendorShopSerializer
+
+class VendorShopListView(APIView):
+    """
+    View to fetch all vendors with their shop names and logos.
+    """
+    permission_classes = []  # Open to all users
+
+    def get(self, request):
+        try:
+            vendors = VendorDetails.objects.all()
+            serializer = VendorShopSerializer(vendors, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# File: vendors\urls.py
+from django.urls import path
+from .views import *
+from django.urls import re_path
+from customer.views import RefundDetailView
+
+urlpatterns = [
+    path('details/', VendorDetailsView.as_view(), name='vendor-details'),
+    path('media/<path:path>', serve_media, name='serve_media'),
+    path('vendor/paid-order-items/', VendorPaidOrderItemsView.as_view(), name='vendor-paid-order-items'),
+    path('dashboard/', VendorDashboardView.as_view(), name='vendor-dashboard'),
+    path('order-items/<int:order_item_id>/update-status/', VendorOrderStatusUpdateView.as_view(), name='vendor-update-status'),
+    path('order-status-options/', OrderStatusOptionsView.as_view(), name='order-status-options'),
+    path('refunds/<int:refund_id>/', RefundDetailView.as_view(), name='refund-detail'),
+    path('shops/', VendorShopListView.as_view(), name='vendor-shops'),
+
+    
+]
+
+urlpatterns += [
+    re_path(r'^media/(?P<path>.+)$', serve_media, name='serve_media'),
+]
+
+# File: vendors\tasks.py
+from celery import shared_task
+from django.core.mail import send_mail
+from django.template.loader import render_to_string
+
+@shared_task
+def send_vendor_activation_email_task(user_email, user_first_name):
+    """Asynchronous task to send vendor activation email."""
+    subject = "Your Vendor Account is Active!"
+    plain_message = f"Congratulations {user_first_name}! Your vendor account on HIDDEN STORES is now active."
+    html_message = render_to_string('emails/vendor_activation_email.html', {
+        'user': {'first_name': user_first_name},
+        'site_url': 'https://hiddenstores.com',  # Replace with actual site URL
+    })
+    send_mail(
+        subject=subject,
+        message=plain_message,
+        from_email="no-reply@hiddenstores.com",
+        recipient_list=[user_email],
+        html_message=html_message,
+    )
+
+
+##################################################
+
