@@ -12,6 +12,7 @@ urlpatterns = [
     path('order-status-options/', OrderStatusOptionsView.as_view(), name='order-status-options'),
     path('refunds/<int:refund_id>/', RefundDetailView.as_view(), name='refund-detail'),
     path('shops/', VendorShopListView.as_view(), name='vendor-shops'),
+    path('ItemTable', OrderItemListView.as_view(), name = 'ItemTable')
 
     
 ]

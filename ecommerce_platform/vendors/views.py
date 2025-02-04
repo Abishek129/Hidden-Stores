@@ -196,3 +196,33 @@ class VendorShopListView(APIView):
             return Response(serializer.data, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.filters import OrderingFilter
+from django.db.models import Q
+
+class OrderItemListView(generics.ListAPIView):
+    serializer_class = OrderItemSerializer
+    filter_backends = [DjangoFilterBackend, OrderingFilter]
+    ordering_fields = ["updated_at"]
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = OrderItem.objects.get(vendor_details = request.user.vendor_details)  # Get all order items
+        
+        # Filter by order_status (if provided)
+        order_status = self.request.query_params.get('order_status', None)
+        if order_status:
+            queryset = queryset.filter(order_status=order_status)
+
+        # Filtering by date range
+        date_filter = self.request.query_params.get('date_filter', None)
+        if date_filter == 'last_day':
+            queryset = queryset.filter(updated_at__gte=now() - timedelta(days=1))
+        elif date_filter == 'last_month':
+            queryset = queryset.filter(updated_at__gte=now() - timedelta(days=30))
+
+        return queryset
